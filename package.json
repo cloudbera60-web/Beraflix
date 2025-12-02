@@ -1,7 +1,7 @@
 {
   "name": "berafix",
   "version": "1.0.0",
-  "description": "Movie and Series Streaming Platform with Neon UI",
+  "description": "Professional Movie and Series Streaming Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,13 +11,18 @@
     "express": "^4.18.2",
     "axios": "^1.6.0",
     "cors": "^2.8.5",
-    "path": "^0.12.7",
+    "compression": "^1.7.4",
+    "helmet": "^7.0.0",
+    "rate-limit": "^0.0.2",
+    "express-rate-limit": "^6.10.0",
+    "morgan": "^1.10.0",
     "puppeteer-core": "^21.5.0",
     "chrome-aws-lambda": "^10.1.0",
-    "mime-types": "^2.1.35",
-    "cheerio": "^1.0.0-rc.12"
+    "cheerio": "^1.0.0-rc.12",
+    "cache-manager": "^5.2.3",
+    "memory-cache": "^0.2.0"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   }
 }
