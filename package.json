@@ -1,0 +1,23 @@
+{
+  "name": "berafix",
+  "version": "1.0.0",
+  "description": "Movie and Series Streaming Platform with Neon UI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "path": "^0.12.7",
+    "puppeteer-core": "^21.5.0",
+    "chrome-aws-lambda": "^10.1.0",
+    "mime-types": "^2.1.35",
+    "cheerio": "^1.0.0-rc.12"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
