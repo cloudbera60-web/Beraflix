@@ -1,861 +1,1652 @@
+/**
+ * CLOUD.MOVIES - Bera Tech Movie Streaming Platform
+ * Complete PWA Movie Streaming & Download Platform
+ * Single server.js implementation
+ */
+
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const cors = require('cors');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 
+// Initialize Express app
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
-// API Configuration
-const API_BASE = 'https://movieapi.giftedtech.co.ke/api';
+// Middleware
+app.use(cors());
+app.use(compression());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-async function fetchAPI(endpoint) {
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use('/api/', limiter);
+
+// Gifted Movies API configuration
+const GIFTED_API_BASE = 'https://movieapi.giftedtech.co.ke';
+const DOWNLOAD_API_BASE = 'https://api.giftedtech.co.ke/api/download';
+
+// Cache for API responses (in-memory)
+const cache = new Map();
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+// Helper function to fetch from API with caching
+async function fetchFromAPI(endpoint) {
+    const cacheKey = crypto.createHash('md5').update(endpoint).digest('hex');
+    const cached = cache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+        return cached.data;
+    }
+    
     try {
-        console.log(`Fetching: ${API_BASE}${endpoint}`);
-        const response = await axios.get(`${API_BASE}${endpoint}`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+        const response = await axios.get(endpoint, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
             timeout: 10000
         });
+        
+        cache.set(cacheKey, {
+            data: response.data,
+            timestamp: Date.now()
+        });
+        
         return response.data;
     } catch (error) {
-        console.error(`Error: ${error.message}`);
-        return null;
+        console.error('API Error:', error.message);
+        throw new Error('Failed to fetch data from API');
     }
 }
 
-// Generate HTML with video streaming
-function generateHTML(content, title = 'Beraflix') {
-    return `<!DOCTYPE html>
-<html lang="en">
+// Serve static files from memory
+const staticFiles = {};
+
+// Generate HTML for the frontend
+function generateFrontend() {
+    return `
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title}</title>
+    <title>CLOUD.MOVIES - Bera Tech Premium Streaming</title>
+    <meta name="description" content="Stream and download movies in HD. Bera Tech's premium movie streaming platform.">
+    <meta name="theme-color" content="#1a1a2e">
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎬</text></svg>">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎬</text></svg>">
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
     <style>
-        /* === NEW: VIDEO PLAYER STYLES === */
-        .video-overlay {
-            display: none;
+        :root {
+            --primary: #6C63FF;
+            --primary-dark: #554fd8;
+            --secondary: #FF6584;
+            --dark-bg: #0f0f23;
+            --dark-card: #1a1a2e;
+            --dark-text: #ffffff;
+            --light-bg: #f5f5f7;
+            --light-card: #ffffff;
+            --light-text: #333333;
+            --gray: #8a8a9e;
+            --success: #4CAF50;
+            --warning: #FF9800;
+            --radius: 12px;
+            --shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            --transition: all 0.3s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--dark-bg);
+            color: var(--dark-text);
+            line-height: 1.6;
+            overflow-x: hidden;
+            transition: var(--transition);
+        }
+
+        body.light-mode {
+            background: var(--light-bg);
+            color: var(--light-text);
+        }
+
+        /* Age Verification Modal */
+        #ageModal {
             position: fixed;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.95);
-            z-index: 9999;
+            background: rgba(0, 0, 0, 0.95);
+            display: flex;
             justify-content: center;
             align-items: center;
+            z-index: 9999;
+            backdrop-filter: blur(10px);
         }
-        
-        .video-container {
+
+        .modal-content {
+            background: var(--dark-card);
+            padding: 40px;
+            border-radius: var(--radius);
+            text-align: center;
+            max-width: 500px;
             width: 90%;
-            max-width: 1000px;
+            box-shadow: var(--shadow);
+            border: 2px solid var(--primary);
+            animation: modalSlideIn 0.5s ease;
+        }
+
+        @keyframes modalSlideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-50px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .modal-content h2 {
+            font-family: 'Poppins', sans-serif;
+            font-size: 2rem;
+            margin-bottom: 20px;
+            color: var(--primary);
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 30px;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            border: none;
+            border-radius: var(--radius);
+            font-family: 'Poppins', sans-serif;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            font-size: 1rem;
+            min-width: 120px;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            transform: translateY(-2px);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--gray);
+            border: 2px solid var(--gray);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        /* Header & Navigation */
+        header {
+            background: rgba(26, 26, 46, 0.95);
+            backdrop-filter: blur(10px);
+            position: fixed;
+            top: 0;
+            width: 100%;
+            z-index: 1000;
+            border-bottom: 1px solid rgba(108, 99, 255, 0.2);
+        }
+
+        body.light-mode header {
+            background: rgba(255, 255, 255, 0.95);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        .nav-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: 'Poppins', sans-serif;
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        .logo span {
+            color: var(--secondary);
+        }
+
+        .search-container {
+            flex: 1;
+            max-width: 600px;
+            margin: 0 30px;
             position: relative;
         }
-        
-        #streamingVideo {
+
+        #searchInput {
             width: 100%;
-            border-radius: 10px;
-            background: #000;
+            padding: 12px 20px;
+            padding-right: 50px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid rgba(108, 99, 255, 0.3);
+            border-radius: var(--radius);
+            color: var(--dark-text);
+            font-size: 1rem;
+            transition: var(--transition);
         }
-        
-        .close-video {
+
+        body.light-mode #searchInput {
+            background: rgba(0, 0, 0, 0.05);
+            border-color: rgba(0, 0, 0, 0.1);
+            color: var(--light-text);
+        }
+
+        #searchInput:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(108, 99, 255, 0.2);
+        }
+
+        #searchResults {
             position: absolute;
-            top: -40px;
+            top: 100%;
+            left: 0;
             right: 0;
-            background: #e50914;
-            color: white;
-            border: none;
-            width: 35px;
-            height: 35px;
-            border-radius: 50%;
-            cursor: pointer;
-            font-size: 18px;
+            background: var(--dark-card);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            margin-top: 5px;
+            max-height: 400px;
+            overflow-y: auto;
+            display: none;
+            z-index: 1001;
         }
-        
-        /* === ENHANCED EPISODE STYLES === */
-        .episode-container {
-            margin: 20px 0;
-            padding: 20px;
-            background: #1a1a1a;
-            border-radius: 10px;
+
+        body.light-mode #searchResults {
+            background: var(--light-card);
         }
-        
-        .season-buttons {
-            display: flex;
-            gap: 10px;
-            margin: 15px 0;
-            flex-wrap: wrap;
-        }
-        
-        .season-btn {
-            padding: 10px 20px;
-            background: #333;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-        
-        .season-btn.active {
-            background: #e50914;
-        }
-        
-        .episode-card {
-            background: #222;
-            margin: 10px 0;
+
+        .search-result-item {
             padding: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            cursor: pointer;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        body.light-mode .search-result-item {
+            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        .search-result-item:hover {
+            background: rgba(108, 99, 255, 0.1);
+        }
+
+        .search-result-item img {
+            width: 50px;
+            height: 70px;
+            object-fit: cover;
             border-radius: 8px;
+        }
+
+        .header-actions {
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            gap: 15px;
         }
-        
-        .episode-info {
-            flex: 1;
+
+        .theme-toggle {
+            background: none;
+            border: none;
+            color: var(--dark-text);
+            cursor: pointer;
+            font-size: 1.5rem;
+            padding: 5px;
+            transition: var(--transition);
         }
-        
-        .episode-title {
-            font-weight: bold;
-            margin-bottom: 5px;
+
+        body.light-mode .theme-toggle {
+            color: var(--light-text);
         }
-        
-        .episode-meta {
-            color: #aaa;
-            font-size: 14px;
+
+        .install-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: var(--radius);
+            cursor: pointer;
+            display: none;
+            font-weight: 500;
+            transition: var(--transition);
         }
-        
-        .episode-actions {
+
+        .install-btn:hover {
+            background: var(--primary-dark);
+        }
+
+        /* Main Content */
+        main {
+            margin-top: 80px;
+            padding: 20px;
+            max-width: 1400px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .hero {
+            text-align: center;
+            padding: 60px 20px;
+            background: linear-gradient(135deg, rgba(108, 99, 255, 0.1), rgba(255, 101, 132, 0.1));
+            border-radius: var(--radius);
+            margin-bottom: 40px;
+            animation: fadeIn 1s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .hero h1 {
+            font-family: 'Poppins', sans-serif;
+            font-size: 3.5rem;
+            margin-bottom: 20px;
+            background: linear-gradient(45deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 1.2rem;
+            color: var(--gray);
+            max-width: 600px;
+            margin: 0 auto 30px;
+        }
+
+        /* Movie Sections */
+        .section-title {
+            font-family: 'Poppins', sans-serif;
+            font-size: 1.8rem;
+            margin: 40px 0 20px;
+            color: var(--primary);
             display: flex;
+            align-items: center;
             gap: 10px;
         }
-        
-        /* === STREAM & DOWNLOAD BUTTONS === */
-        .btn-stream {
-            background: #e50914;
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: 5px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 5px;
+
+        .movies-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 25px;
+            margin-bottom: 40px;
         }
-        
-        .btn-download {
-            background: #00a8ff;
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: 5px;
+
+        .movie-card {
+            background: var(--dark-card);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: var(--transition);
             cursor: pointer;
-            display: flex;
-            align-items: center;
-            gap: 5px;
+            animation: cardSlideUp 0.5s ease;
+            animation-fill-mode: both;
         }
-        
-        /* === OTHER STYLES === */
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #0a0a0a; color: white; font-family: Arial, sans-serif; }
-        
-        .header {
-            background: #141414;
+
+        body.light-mode .movie-card {
+            background: var(--light-card);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        @keyframes cardSlideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .movie-card:hover {
+            transform: translateY(-10px);
+            box-shadow: var(--shadow);
+        }
+
+        .movie-card img {
+            width: 100%;
+            height: 300px;
+            object-fit: cover;
+            transition: var(--transition);
+        }
+
+        .movie-card:hover img {
+            transform: scale(1.05);
+        }
+
+        .movie-info {
             padding: 15px;
+        }
+
+        .movie-title {
+            font-weight: 600;
+            margin-bottom: 5px;
+            font-size: 1.1rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .movie-meta {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+
+        .rating {
+            color: var(--warning);
+            font-weight: 500;
+        }
+
+        /* Movie Details Modal */
+        .details-modal {
             position: fixed;
             top: 0;
             left: 0;
-            right: 0;
-            z-index: 100;
-        }
-        
-        .logo { color: #e50914; font-size: 24px; font-weight: bold; }
-        
-        .search-box {
-            padding: 10px 15px;
-            background: #333;
-            border: none;
-            border-radius: 5px;
-            color: white;
-            width: 250px;
-        }
-        
-        .main-content { margin-top: 80px; padding: 20px; }
-        
-        .section-title { margin: 20px 0 15px 0; font-size: 22px; }
-        
-        .movies-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
-        }
-        
-        .movie-card {
-            background: #181818;
-            border-radius: 8px;
-            overflow: hidden;
-            cursor: pointer;
-            transition: transform 0.3s;
-        }
-        
-        .movie-card:hover { transform: scale(1.05); }
-        
-        .movie-poster {
             width: 100%;
-            height: 225px;
-            object-fit: cover;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+            padding: 20px;
+            overflow-y: auto;
         }
-        
-        .movie-info { padding: 10px; }
-        .movie-title { font-weight: bold; margin-bottom: 5px; }
-        .movie-meta { color: #aaa; font-size: 14px; }
-        
-        .btn {
-            background: #e50914;
+
+        .details-content {
+            background: var(--dark-card);
+            border-radius: var(--radius);
+            max-width: 1200px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            position: relative;
+            animation: modalScaleIn 0.3s ease;
+        }
+
+        body.light-mode .details-content {
+            background: var(--light-card);
+        }
+
+        @keyframes modalScaleIn {
+            from {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        .close-modal {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.5);
             color: white;
             border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            font-size: 1.5rem;
             cursor: pointer;
-            margin: 5px;
+            z-index: 2001;
+            transition: var(--transition);
         }
-        
-        .loading { text-align: center; padding: 40px; color: #666; }
-        
-        .quality-options {
+
+        .close-modal:hover {
+            background: var(--primary);
+        }
+
+        .movie-hero {
+            position: relative;
+            height: 400px;
+            overflow: hidden;
+        }
+
+        .movie-hero img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            filter: brightness(0.6);
+        }
+
+        .movie-hero-content {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 40px;
+            background: linear-gradient(transparent, rgba(0, 0, 0, 0.9));
+        }
+
+        .movie-details-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 15px;
+            grid-template-columns: 1fr 300px;
+            gap: 40px;
+            padding: 40px;
+        }
+
+        @media (max-width: 768px) {
+            .movie-details-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .quality-selector {
+            display: flex;
+            gap: 10px;
             margin: 20px 0;
         }
-        
-        .quality-card {
-            background: #222;
-            padding: 15px;
-            border-radius: 8px;
-            border: 2px solid transparent;
+
+        .quality-btn {
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid var(--primary);
+            color: var(--dark-text);
+            border-radius: var(--radius);
+            cursor: pointer;
+            transition: var(--transition);
         }
-        
-        .quality-card:hover { border-color: #e50914; }
+
+        .quality-btn.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        /* Loading Animation */
+        .loader {
+            display: inline-block;
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(108, 99, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: var(--primary);
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Footer */
+        footer {
+            background: var(--dark-card);
+            padding: 40px 20px;
+            margin-top: 60px;
+            text-align: center;
+            border-top: 1px solid rgba(108, 99, 255, 0.2);
+        }
+
+        body.light-mode footer {
+            background: var(--light-card);
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        .footer-content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .footer-logo {
+            font-family: 'Poppins', sans-serif;
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 20px;
+        }
+
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a {
+            color: var(--gray);
+            text-decoration: none;
+            transition: var(--transition);
+        }
+
+        .footer-links a:hover {
+            color: var(--primary);
+        }
+
+        .copyright {
+            color: var(--gray);
+            margin-top: 30px;
+            font-size: 0.9rem;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .nav-container {
+                flex-direction: column;
+                gap: 15px;
+            }
+            
+            .search-container {
+                margin: 10px 0;
+                width: 100%;
+            }
+            
+            .hero h1 {
+                font-size: 2.5rem;
+            }
+            
+            .movies-grid {
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 15px;
+            }
+            
+            main {
+                margin-top: 140px;
+            }
+        }
+
+        /* PWA Install Banner */
+        .install-banner {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--dark-card);
+            padding: 15px 20px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            display: none;
+            align-items: center;
+            gap: 15px;
+            z-index: 1000;
+            animation: slideUp 0.3s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateX(-50%) translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(-50%) translateY(0);
+            }
+        }
+
+        body.light-mode .install-banner {
+            background: var(--light-card);
+        }
+
+        /* Toast Notifications */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: var(--dark-card);
+            color: var(--dark-text);
+            padding: 15px 25px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            display: none;
+            align-items: center;
+            gap: 10px;
+            z-index: 1000;
+            animation: slideInRight 0.3s ease;
+        }
+
+        @keyframes slideInRight {
+            from {
+                opacity: 0;
+                transform: translateX(100%);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        body.light-mode .toast {
+            background: var(--light-card);
+            color: var(--light-text);
+        }
+
+        /* Progress Bar for Streaming */
+        .progress-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            z-index: 9999;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            width: 0%;
+            transition: width 0.3s ease;
+        }
     </style>
 </head>
 <body>
-    <!-- HEADER -->
-    <div class="header">
-        <div class="logo">BERAFLIX</div>
-        <input type="text" class="search-box" placeholder="Search movies..." 
-               id="searchInput" onkeyup="searchMovies(this.value)">
-    </div>
-    
-    <!-- MAIN CONTENT -->
-    <div class="main-content" id="content">${content}</div>
-    
-    <!-- === NEW: VIDEO PLAYER OVERLAY === -->
-    <div class="video-overlay" id="videoOverlay">
-        <div class="video-container">
-            <button class="close-video" onclick="closeVideo()">✕</button>
-            <video id="streamingVideo" controls autoplay>
-                Your browser does not support video streaming.
-            </video>
+    <!-- Age Verification Modal -->
+    <div id="ageModal">
+        <div class="modal-content">
+            <h2>🔞 Age Verification</h2>
+            <p>CLOUD.MOVIES contains content suitable for viewers aged 18 and above. By entering, you confirm that you are at least 18 years old.</p>
+            <div class="modal-buttons">
+                <button class="btn btn-primary" id="confirmAge">I'm 18 or older</button>
+                <button class="btn btn-secondary" id="denyAge">I'm under 18</button>
+            </div>
+            <p style="margin-top: 20px; font-size: 0.9rem; color: var(--gray);">© 2024 Bera Tech - CLOUD.MOVIES</p>
         </div>
     </div>
-    
-    <script>
-        // === NEW: VIDEO STREAMING FUNCTIONS ===
-        let currentVideoUrl = '';
-        
-        function playVideo(videoUrl, title) {
-            console.log('Playing video:', videoUrl);
-            const video = document.getElementById('streamingVideo');
-            const overlay = document.getElementById('videoOverlay');
+
+    <!-- Progress Bar -->
+    <div class="progress-container">
+        <div class="progress-bar"></div>
+    </div>
+
+    <!-- Install Banner -->
+    <div class="install-banner" id="installBanner">
+        <span>Install CLOUD.MOVIES for better experience</span>
+        <button class="btn btn-primary" id="installBtn">Install</button>
+        <button class="btn btn-secondary" id="dismissInstall">Not Now</button>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast"></div>
+
+    <!-- Header -->
+    <header>
+        <div class="nav-container">
+            <a href="#" class="logo">
+                🎬 CLOUD.<span>MOVIES</span>
+            </a>
             
-            video.src = videoUrl;
-            currentVideoUrl = videoUrl;
-            overlay.style.display = 'flex';
+            <div class="search-container">
+                <input type="text" id="searchInput" placeholder="Search movies, TV series...">
+                <div id="searchResults"></div>
+            </div>
             
-            // Try to play
-            video.play().catch(e => {
-                console.log('Auto-play prevented:', e);
-                video.controls = true;
-            });
-            
-            // Update page title
-            document.title = 'Watching: ' + title + ' - Beraflix';
-        }
-        
-        function closeVideo() {
-            const video = document.getElementById('streamingVideo');
-            const overlay = document.getElementById('videoOverlay');
-            
-            video.pause();
-            video.src = '';
-            overlay.style.display = 'none';
-            document.title = 'Beraflix';
-        }
-        
-        // Close with ESC key
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeVideo();
-        });
-        
-        // === SEARCH FUNCTION ===
-        let searchTimer;
-        function searchMovies(query) {
-            clearTimeout(searchTimer);
-            if (query.length < 2) return;
-            
-            searchTimer = setTimeout(async () => {
-                document.getElementById('content').innerHTML = '<div class="loading">Searching...</div>';
-                try {
-                    const response = await fetch('/api/search/' + encodeURIComponent(query));
-                    const data = await response.json();
-                    displaySearchResults(data, query);
-                } catch (error) {
-                    document.getElementById('content').innerHTML = '<div class="loading">Search failed</div>';
-                }
-            }, 500);
-        }
-        
-        function displaySearchResults(data, query) {
-            if (!data || !data.results || !data.results.items) {
-                document.getElementById('content').innerHTML = \`
-                    <div class="loading">
-                        <h3>No results for "\${query}"</h3>
-                        <p>Try: avatar, spider-man, breaking bad</p>
-                    </div>
-                \`;
-                return;
-            }
-            
-            let html = \`<h2 class="section-title">Results for "\${query}"</h2><div class="movies-grid">\`;
-            
-            data.results.items.forEach(item => {
-                const type = item.subjectType === 2 ? 'series' : 'movie';
-                html += \`
-                    <div class="movie-card" onclick="viewDetail('\${item.subjectId}', '\${type}')">
-                        <img src="\${item.cover?.url || ''}" class="movie-poster"
-                             onerror="this.src='https://via.placeholder.com/150x225/333/fff?text=Image'">
-                        <div class="movie-info">
-                            <div class="movie-title">\${item.title || 'Untitled'}</div>
-                            <div class="movie-meta">
-                                \${item.releaseDate ? item.releaseDate.split('-')[0] : ''}
-                                \${item.subjectType === 2 ? ' • Series' : ''}
-                            </div>
-                        </div>
-                    </div>
-                \`;
-            });
-            
-            html += '</div>';
-            document.getElementById('content').innerHTML = html;
-        }
-        
-        // === VIEW DETAIL ===
-        function viewDetail(id, type) {
-            window.location.href = '/' + type + '/' + id;
-        }
-        
-        // === DOWNLOAD FUNCTION ===
-        function downloadFile(url, filename) {
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename || 'download.mp4';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        }
-        
-        // === ENHANCED SEASON LOADING ===
-        async function loadSeason(seasonNum, seriesId, seriesTitle) {
-            console.log('Loading season:', seasonNum, 'for series:', seriesId);
-            const episodesDiv = document.getElementById('episodes');
-            episodesDiv.innerHTML = \`
-                <div class="loading">
-                    <h4>Loading Season \${seasonNum} episodes...</h4>
-                    <p>Trying different season formats...</p>
+            <div class="header-actions">
+                <button class="theme-toggle" id="themeToggle">🌙</button>
+                <button class="install-btn" id="headerInstallBtn">📱 Install App</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+        <section class="hero">
+            <h1>Stream Unlimited Movies & TV Shows</h1>
+            <p>Bera Tech's premium streaming platform. Watch in HD, download offline, and enjoy exclusive content.</p>
+            <div class="search-container" style="max-width: 500px; margin: 30px auto;">
+                <input type="text" id="heroSearch" placeholder="What do you want to watch today?">
+            </div>
+        </section>
+
+        <!-- Movie Sections -->
+        <section id="featuredSection">
+            <h2 class="section-title">⭐ Featured Movies</h2>
+            <div class="movies-grid" id="featuredMovies">
+                <!-- Featured movies will be loaded here -->
+            </div>
+        </section>
+
+        <section id="trendingSection">
+            <h2 class="section-title">🔥 Trending Now</h2>
+            <div class="movies-grid" id="trendingMovies">
+                <!-- Trending movies will be loaded here -->
+            </div>
+        </section>
+
+        <section id="latestSection">
+            <h2 class="section-title">🆕 Latest Releases</h2>
+            <div class="movies-grid" id="latestMovies">
+                <!-- Latest movies will be loaded here -->
+            </div>
+        </section>
+
+        <section id="topRatedSection">
+            <h2 class="section-title">🏆 Top Rated</h2>
+            <div class="movies-grid" id="topRatedMovies">
+                <!-- Top rated movies will be loaded here -->
+            </div>
+        </section>
+    </main>
+
+    <!-- Movie Details Modal -->
+    <div class="details-modal" id="movieDetailsModal">
+        <div class="details-content">
+            <button class="close-modal" id="closeDetails">×</button>
+            <div class="movie-hero">
+                <img id="detailHeroImg" src="" alt="">
+                <div class="movie-hero-content">
+                    <h1 id="detailTitle"></h1>
+                    <div id="detailMeta"></div>
                 </div>
-            \`;
+            </div>
+            <div class="movie-details-grid">
+                <div>
+                    <h3>Overview</h3>
+                    <p id="detailDescription"></p>
+                    
+                    <h3 style="margin-top: 30px;">Cast</h3>
+                    <div id="detailCast"></div>
+                    
+                    <h3 style="margin-top: 30px;">Stream & Download</h3>
+                    <div class="quality-selector">
+                        <button class="quality-btn active" data-quality="360p">360p</button>
+                        <button class="quality-btn" data-quality="480p">480p</button>
+                        <button class="quality-btn" data-quality="720p">720p</button>
+                    </div>
+                    <div style="display: flex; gap: 15px; margin-top: 20px;">
+                        <button class="btn btn-primary" id="streamBtn">▶ Stream Now</button>
+                        <button class="btn btn-secondary" id="downloadBtn">⬇ Download</button>
+                    </div>
+                </div>
+                <div>
+                    <h3>Details</h3>
+                    <div id="detailInfo"></div>
+                    
+                    <div style="margin-top: 30px; padding: 20px; background: rgba(108, 99, 255, 0.1); border-radius: var(--radius);">
+                        <h4>📱 Watch Offline</h4>
+                        <p style="margin: 10px 0; font-size: 0.9rem;">Install CLOUD.MOVIES as PWA to watch movies offline!</p>
+                        <button class="btn btn-primary" id="pwaInstallBtn" style="width: 100%;">Install App</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-content">
+            <div class="footer-logo">CLOUD.MOVIES</div>
+            <p>Bera Tech's Premium Streaming Platform</p>
+            <div class="footer-links">
+                <a href="#" data-section="featured">Home</a>
+                <a href="#" data-section="trending">Trending</a>
+                <a href="#" data-section="latest">Latest</a>
+                <a href="#" data-section="topRated">Top Rated</a>
+                <a href="#" id="aboutLink">About</a>
+                <a href="#" id="contactLink">Contact</a>
+            </div>
+            <div class="copyright">
+                © 2024 Bera Tech. All rights reserved. Movies provided by Gifted Movies API.
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Global State
+        let currentMovieId = null;
+        let currentQuality = '360p';
+        let deferredPrompt = null;
+        let isPWAInstalled = false;
+        let ageVerified = localStorage.getItem('ageVerified') === 'true';
+
+        // DOM Elements
+        const ageModal = document.getElementById('ageModal');
+        const confirmAgeBtn = document.getElementById('confirmAge');
+        const denyAgeBtn = document.getElementById('denyAge');
+        const themeToggle = document.getElementById('themeToggle');
+        const searchInput = document.getElementById('searchInput');
+        const heroSearch = document.getElementById('heroSearch');
+        const searchResults = document.getElementById('searchResults');
+        const installBanner = document.getElementById('installBanner');
+        const installBtn = document.getElementById('installBtn');
+        const headerInstallBtn = document.getElementById('headerInstallBtn');
+        const pwaInstallBtn = document.getElementById('pwaInstallBtn');
+        const dismissInstall = document.getElementById('dismissInstall');
+        const movieDetailsModal = document.getElementById('movieDetailsModal');
+        const closeDetails = document.getElementById('closeDetails');
+        const streamBtn = document.getElementById('streamBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const toast = document.getElementById('toast');
+        const progressContainer = document.querySelector('.progress-container');
+        const progressBar = document.querySelector('.progress-bar');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Age Verification
+            if (!ageVerified) {
+                ageModal.style.display = 'flex';
+            } else {
+                ageModal.style.display = 'none';
+                await loadHomepageContent();
+            }
+
+            // Theme
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            setTheme(savedTheme);
+
+            // Search functionality
+            setupSearch();
             
-            // Try multiple season parameter formats
-            const seasonFormats = [
-                seasonNum,                         // 1
-                seasonNum.toString().padStart(2, '0'), // 01
-                \`S\${seasonNum.toString().padStart(2, '0')}\`, // S01
-                \`season\${seasonNum}\`,           // season1
-                \`Season \${seasonNum}\`           // Season 1
-            ];
+            // PWA Installation
+            setupPWA();
             
-            for (let format of seasonFormats) {
+            // Event Listeners
+            setupEventListeners();
+        });
+
+        // Age Verification
+        confirmAgeBtn.addEventListener('click', () => {
+            localStorage.setItem('ageVerified', 'true');
+            ageModal.style.display = 'none';
+            ageVerified = true;
+            loadHomepageContent();
+            showToast('Age verified successfully!', 'success');
+        });
+
+        denyAgeBtn.addEventListener('click', () => {
+            document.body.innerHTML = '<div style="display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center;"><div><h1 style="color: var(--primary);">Access Denied</h1><p>You must be 18 or older to access this content.</p><p>© 2024 Bera Tech - CLOUD.MOVIES</p></div></div>';
+        });
+
+        // Theme Toggle
+        themeToggle.addEventListener('click', () => {
+            const currentTheme = document.body.classList.contains('light-mode') ? 'light' : 'dark';
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            setTheme(newTheme);
+        });
+
+        function setTheme(theme) {
+            if (theme === 'light') {
+                document.body.classList.add('light-mode');
+                themeToggle.textContent = '☀️';
+            } else {
+                document.body.classList.remove('light-mode');
+                themeToggle.textContent = '🌙';
+            }
+            localStorage.setItem('theme', theme);
+        }
+
+        // Search Functionality
+        function setupSearch() {
+            let searchTimeout;
+            
+            const performSearch = async (query) => {
+                if (query.length < 2) {
+                    searchResults.style.display = 'none';
+                    return;
+                }
+                
                 try {
-                    console.log('Trying format:', format);
-                    const response = await fetch('/api/sources/' + seriesId + '?season=' + format);
+                    const response = await fetch(\`/api/search/\${encodeURIComponent(query)}\`);
                     const data = await response.json();
                     
-                    if (data && data.results && data.results.length > 0) {
-                        displayEpisodes(data.results, seasonNum, seriesTitle);
-                        return;
+                    if (data.success && data.data) {
+                        displaySearchResults(data.data);
+                    } else {
+                        searchResults.innerHTML = '<div class="search-result-item">No results found</div>';
+                        searchResults.style.display = 'block';
                     }
                 } catch (error) {
-                    console.log('Failed with format:', format);
+                    console.error('Search error:', error);
+                }
+            };
+            
+            searchInput.addEventListener('input', (e) => {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => performSearch(e.target.value), 300);
+            });
+            
+            heroSearch.addEventListener('input', (e) => {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => performSearch(e.target.value), 300);
+            });
+            
+            // Close search results when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!searchResults.contains(e.target) && e.target !== searchInput && e.target !== heroSearch) {
+                    searchResults.style.display = 'none';
+                }
+            });
+        }
+
+        function displaySearchResults(results) {
+            searchResults.innerHTML = '';
+            
+            results.slice(0, 10).forEach(movie => {
+                const item = document.createElement('div');
+                item.className = 'search-result-item';
+                item.innerHTML = \`
+                    <img src="\${movie.image || 'https://via.placeholder.com/50x70/1a1a2e/ffffff?text=No+Image'}" alt="\${movie.title}">
+                    <div>
+                        <div style="font-weight: 500;">\${movie.title}</div>
+                        <div style="font-size: 0.8rem; color: var(--gray);">\${movie.year || 'N/A'} • \${movie.type || 'Movie'}</div>
+                    </div>
+                \`;
+                
+                item.addEventListener('click', () => {
+                    showMovieDetails(movie.id);
+                    searchResults.style.display = 'none';
+                    searchInput.value = '';
+                    heroSearch.value = '';
+                });
+                
+                searchResults.appendChild(item);
+            });
+            
+            searchResults.style.display = 'block';
+        }
+
+        // Load Homepage Content
+        async function loadHomepageContent() {
+            const sections = ['featured', 'trending', 'latest', 'topRated'];
+            
+            for (const section of sections) {
+                try {
+                    const response = await fetch(\`/api/discover/\${section}\`);
+                    const data = await response.json();
+                    
+                    if (data.success && data.data) {
+                        displayMovies(section, data.data.slice(0, 12));
+                    }
+                } catch (error) {
+                    console.error(\`Error loading \${section}:\`, error);
+                    document.getElementById(\`\${section}Movies\`).innerHTML = 
+                        '<div style="text-align: center; padding: 40px; color: var(--gray);">Failed to load movies</div>';
                 }
             }
-            
-            // If no episodes found
-            episodesDiv.innerHTML = \`
-                <div class="loading">
-                    <h4>⚠️ No episodes found for Season \${seasonNum}</h4>
-                    <p>Try another season:</p>
-                    <div class="season-buttons" style="margin-top: 15px;">
-                        \${[1,2,3,4,5].map(s => \`
-                            <button class="season-btn \${s === seasonNum ? 'active' : ''}" 
-                                    onclick="loadSeason(\${s}, '\${seriesId}', '\${seriesTitle}')">
-                                Season \${s}
-                            </button>
-                        \`).join('')}
-                    </div>
-                </div>
-            \`;
         }
-        
-        function displayEpisodes(episodes, seasonNum, seriesTitle) {
-            let html = \`
-                <h3 style="margin-bottom: 15px;">Season \${seasonNum} Episodes</h3>
-                <div style="color: #aaa; margin-bottom: 15px;">
-                    Found \${episodes.length} episodes
-                </div>
-            \`;
+
+        function displayMovies(sectionId, movies) {
+            const container = document.getElementById(\`\${sectionId}Movies\`);
+            container.innerHTML = '';
             
-            episodes.forEach((episode, index) => {
-                const episodeNum = index + 1;
-                const size = episode.size ? (episode.size / 1000000).toFixed(1) + ' MB' : '';
-                const filename = \`\${seriesTitle.replace(/[^a-z0-9]/gi, '_')}_S\${seasonNum}E\${episodeNum}_\${episode.quality}.mp4\`;
+            movies.forEach((movie, index) => {
+                const card = document.createElement('div');
+                card.className = 'movie-card';
+                card.style.animationDelay = \`\${index * 0.05}s\`;
                 
-                html += \`
-                    <div class="episode-card">
-                        <div class="episode-info">
-                            <div class="episode-title">Episode \${episodeNum}</div>
-                            <div class="episode-meta">
-                                \${episode.quality} • \${episode.format || 'mp4'} • \${size}
-                            </div>
-                        </div>
-                        <div class="episode-actions">
-                            <button class="btn-stream" onclick="playVideo('\${episode.download_url}', '\${seriesTitle} - S\${seasonNum}E\${episodeNum}')">
-                                ▶ Play
-                            </button>
-                            <button class="btn-download" onclick="downloadFile('\${episode.download_url}', '\${filename}')">
-                                ⬇ Download
-                            </button>
+                card.innerHTML = \`
+                    <img src="\${movie.image || 'https://via.placeholder.com/200x300/1a1a2e/ffffff?text=No+Image'}" 
+                         alt="\${movie.title}" 
+                         onerror="this.src='https://via.placeholder.com/200x300/1a1a2e/ffffff?text=No+Image'">
+                    <div class="movie-info">
+                        <div class="movie-title">\${movie.title || 'Untitled'}</div>
+                        <div class="movie-meta">
+                            <span>\${movie.year || 'N/A'}</span>
+                            <span class="rating">⭐ \${movie.rating || 'N/A'}</span>
                         </div>
                     </div>
                 \`;
+                
+                card.addEventListener('click', () => showMovieDetails(movie.id));
+                container.appendChild(card);
             });
-            
-            document.getElementById('episodes').innerHTML = html;
         }
-        
-        // === AUTO PLAY PREVIEW ===
-        async function autoPlayPreview(movieId, movieTitle) {
+
+        // Movie Details
+        async function showMovieDetails(movieId) {
+            currentMovieId = movieId;
+            showProgress();
+            
             try {
-                const response = await fetch('/api/sources/' + movieId);
+                const response = await fetch(\`/api/info/\${movieId}\`);
                 const data = await response.json();
                 
-                if (data && data.results && data.results.length > 0) {
-                    // Add preview button
-                    const firstSource = data.results[0];
-                    const actionDiv = document.querySelector('.detail-actions');
-                    
-                    if (actionDiv) {
-                        const previewBtn = document.createElement('button');
-                        previewBtn.className = 'btn-stream';
-                        previewBtn.style.marginRight = '10px';
-                        previewBtn.innerHTML = '▶ Preview Movie';
-                        previewBtn.onclick = () => playVideo(firstSource.download_url, movieTitle + ' Preview');
-                        actionDiv.prepend(previewBtn);
-                    }
+                if (data.success && data.data) {
+                    updateMovieDetailsUI(data.data);
+                    movieDetailsModal.style.display = 'flex';
+                    document.body.style.overflow = 'hidden';
                 }
             } catch (error) {
-                console.log('Preview not available');
+                console.error('Error loading movie details:', error);
+                showToast('Failed to load movie details', 'error');
+            } finally {
+                hideProgress();
             }
+        }
+
+        function updateMovieDetailsUI(movie) {
+            document.getElementById('detailHeroImg').src = movie.image || '';
+            document.getElementById('detailTitle').textContent = movie.title || 'Unknown Title';
+            
+            // Meta info
+            const meta = document.getElementById('detailMeta');
+            meta.innerHTML = \`
+                <div style="display: flex; gap: 15px; margin: 10px 0;">
+                    <span>⭐ \${movie.rating || 'N/A'}</span>
+                    <span>📅 \${movie.releaseDate || 'N/A'}</span>
+                    <span>🎭 \${movie.genre?.join(', ') || 'N/A'}</span>
+                </div>
+            \`;
+            
+            // Description
+            document.getElementById('detailDescription').textContent = movie.description || 'No description available.';
+            
+            // Cast
+            const castContainer = document.getElementById('detailCast');
+            if (movie.cast && movie.cast.length > 0) {
+                castContainer.innerHTML = movie.cast.slice(0, 6).map(actor => 
+                    \`<div style="display: inline-block; background: rgba(108, 99, 255, 0.1); padding: 5px 10px; border-radius: 20px; margin: 5px;">\${actor}</div>\`
+                ).join('');
+            } else {
+                castContainer.textContent = 'Cast information not available.';
+            }
+            
+            // Details
+            const infoContainer = document.getElementById('detailInfo');
+            infoContainer.innerHTML = \`
+                <p><strong>Type:</strong> \${movie.type || 'Movie'}</p>
+                <p><strong>Duration:</strong> \${movie.duration || 'N/A'}</p>
+                <p><strong>Country:</strong> \${movie.country || 'N/A'}</p>
+                <p><strong>Director:</strong> \${movie.director || 'N/A'}</p>
+                <p><strong>Production:</strong> \${movie.production || 'N/A'}</p>
+            \`;
+        }
+
+        // Quality Selection
+        document.querySelectorAll('.quality-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.quality-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentQuality = btn.dataset.quality;
+            });
+        });
+
+        // Stream Button
+        streamBtn.addEventListener('click', async () => {
+            if (!currentMovieId) return;
+            
+            showProgress();
+            try {
+                const response = await fetch(\`/api/stream/\${currentMovieId}?quality=\${currentQuality}\`);
+                const data = await response.json();
+                
+                if (data.success && data.url) {
+                    // Open video player in new modal or redirect
+                    window.open(data.url, '_blank');
+                    showToast('Streaming started in new tab', 'success');
+                }
+            } catch (error) {
+                console.error('Stream error:', error);
+                showToast('Failed to start streaming', 'error');
+            } finally {
+                hideProgress();
+            }
+        });
+
+        // Download Button
+        downloadBtn.addEventListener('click', async () => {
+            if (!currentMovieId) return;
+            
+            showProgress();
+            try {
+                const response = await fetch(\`/api/download/\${currentMovieId}?quality=\${currentQuality}\`);
+                const blob = await response.blob();
+                
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = \`\${document.getElementById('detailTitle').textContent} - \${currentQuality}.mp4\`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                showToast('Download started!', 'success');
+            } catch (error) {
+                console.error('Download error:', error);
+                showToast('Failed to download', 'error');
+            } finally {
+                hideProgress();
+            }
+        });
+
+        // Close Modal
+        closeDetails.addEventListener('click', () => {
+            movieDetailsModal.style.display = 'none';
+            document.body.style.overflow = 'auto';
+        });
+
+        movieDetailsModal.addEventListener('click', (e) => {
+            if (e.target === movieDetailsModal) {
+                movieDetailsModal.style.display = 'none';
+                document.body.style.overflow = 'auto';
+            }
+        });
+
+        // PWA Installation
+        function setupPWA() {
+            // Check if PWA is already installed
+            if (window.matchMedia('(display-mode: standalone)').matches) {
+                isPWAInstalled = true;
+                headerInstallBtn.style.display = 'none';
+            }
+            
+            // Before install prompt
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                deferredPrompt = e;
+                
+                // Show install banner after 5 seconds
+                setTimeout(() => {
+                    if (!isPWAInstalled) {
+                        installBanner.style.display = 'flex';
+                    }
+                }, 5000);
+                
+                headerInstallBtn.style.display = 'block';
+            });
+            
+            // App installed
+            window.addEventListener('appinstalled', () => {
+                isPWAInstalled = true;
+                installBanner.style.display = 'none';
+                headerInstallBtn.style.display = 'none';
+                showToast('App installed successfully!', 'success');
+            });
+        }
+
+        installBtn.addEventListener('click', async () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                
+                if (outcome === 'accepted') {
+                    installBanner.style.display = 'none';
+                }
+                
+                deferredPrompt = null;
+            }
+        });
+
+        headerInstallBtn.addEventListener('click', () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+            }
+        });
+
+        pwaInstallBtn.addEventListener('click', () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+            }
+        });
+
+        dismissInstall.addEventListener('click', () => {
+            installBanner.style.display = 'none';
+        });
+
+        // Service Worker Registration
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js').then(registration => {
+                    console.log('ServiceWorker registered:', registration);
+                }).catch(error => {
+                    console.log('ServiceWorker registration failed:', error);
+                });
+            });
+        }
+
+        // Helper Functions
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.style.display = 'flex';
+            
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+
+        function showProgress() {
+            progressContainer.style.display = 'block';
+            let width = 0;
+            const interval = setInterval(() => {
+                if (width >= 90) {
+                    clearInterval(interval);
+                } else {
+                    width += 10;
+                    progressBar.style.width = width + '%';
+                }
+            }, 100);
+        }
+
+        function hideProgress() {
+            progressBar.style.width = '100%';
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+                progressBar.style.width = '0%';
+            }, 300);
+        }
+
+        // Event Listeners Setup
+        function setupEventListeners() {
+            // Footer links
+            document.querySelectorAll('[data-section]').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const section = e.target.dataset.section;
+                    document.getElementById(\`\${section}Section\`).scrollIntoView({
+                        behavior: 'smooth'
+                    });
+                });
+            });
+            
+            // About and Contact links
+            document.getElementById('aboutLink')?.addEventListener('click', (e) => {
+                e.preventDefault();
+                showToast('CLOUD.MOVIES - Bera Tech Premium Streaming Platform', 'info');
+            });
+            
+            document.getElementById('contactLink')?.addEventListener('click', (e) => {
+                e.preventDefault();
+                showToast('Contact: support@beratech.cloudmovies', 'info');
+            });
         }
     </script>
 </body>
 </html>`;
 }
 
-// ================== ROUTES ==================
-
-// Home Page
-app.get('/', async (req, res) => {
-    const content = `
-        <div style="text-align: center; padding: 40px 20px;">
-            <h1 style="font-size: 36px; margin-bottom: 20px; color: #e50914;">BERAFLIX</h1>
-            <p style="color: #aaa; font-size: 18px; margin-bottom: 30px;">
-                Stream & Download Movies & TV Series
-            </p>
-            
-            <div style="max-width: 400px; margin: 0 auto;">
-                <input type="text" 
-                       class="search-box" 
-                       placeholder="Try: Siren, Avatar, Breaking Bad..." 
-                       style="width: 100%; margin-bottom: 20px;"
-                       onkeyup="searchMovies(this.value)">
-                
-                <div style="display: flex; gap: 10px; justify-content: center;">
-                    <button class="btn" onclick="searchMovies('siren')">Siren</button>
-                    <button class="btn" onclick="searchMovies('avatar')">Avatar</button>
-                    <button class="btn" onclick="searchMovies('breaking bad')">Breaking Bad</button>
-                </div>
-            </div>
-            
-            <div style="margin-top: 40px; color: #666;">
-                <p><strong>🎬 New Feature:</strong> Live Video Streaming!</p>
-                <p><strong>📺 Enhanced:</strong> TV Series Episode Support</p>
-                <p><strong>⬇ Fixed:</strong> Season Loading Issues</p>
-            </div>
-        </div>
-    `;
-    
-    res.send(generateHTML(content, 'Beraflix - Home'));
+// Generate Service Worker
+function generateServiceWorker() {
+    return `
+self.addEventListener('install', (event) => {
+    event.waitUntil(
+        caches.open('cloud-movies-v1').then((cache) => {
+            return cache.addAll([
+                '/',
+                '/manifest.json'
+            ]);
+        })
+    );
 });
 
-// Movie Detail Page
-app.get('/movie/:id', async (req, res) => {
-    try {
-        const movieId = req.params.id;
-        const info = await fetchAPI(`/info/${movieId}`);
-        
-        if (!info || !info.results || !info.results.subject) {
-            throw new Error('Movie not found');
-        }
-        
-        const movie = info.results.subject;
-        const title = movie.title || 'Unknown';
-        const year = movie.releaseDate ? movie.releaseDate.split('-')[0] : '';
-        const desc = movie.description || 'No description available.';
-        const image = movie.cover?.url || '';
-        const rating = movie.imdbRatingValue || '';
-        
-        const content = `
-            <div style="max-width: 1200px; margin: 0 auto;">
-                <div style="display: flex; flex-wrap: wrap; gap: 30px; margin-bottom: 30px;">
-                    <div style="flex: 0 0 300px;">
-                        <img src="${image}" 
-                             style="width: 100%; border-radius: 10px;"
-                             onerror="this.src='https://via.placeholder.com/300x450/333/fff?text=Poster'">
-                    </div>
-                    
-                    <div style="flex: 1; min-width: 300px;">
-                        <h1 style="font-size: 32px; margin-bottom: 10px;">${title}</h1>
-                        
-                        <div style="color: #aaa; margin-bottom: 20px; display: flex; gap: 15px;">
-                            ${year ? `<span>📅 ${year}</span>` : ''}
-                            ${rating ? `<span>⭐ ${rating}/10</span>` : ''}
-                            <span>🎬 Movie</span>
-                        </div>
-                        
-                        <p style="line-height: 1.6; margin-bottom: 25px; font-size: 16px;">${desc}</p>
-                        
-                        <div class="detail-actions" style="margin-bottom: 25px;">
-                            <button class="btn" onclick="loadSources('${movieId}', '${title}')">
-                                ⬇ View Download Options
-                            </button>
-                            <button class="btn" onclick="window.history.back()" style="background: #333;">
-                                ← Go Back
-                            </button>
-                        </div>
-                        
-                        <div id="sources">
-                            <div class="loading">
-                                <p>🔄 Loading streaming & download options...</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <script>
-                async function loadSources(movieId, movieTitle) {
-                    const sourcesDiv = document.getElementById('sources');
-                    sourcesDiv.innerHTML = '<div class="loading">🔄 Loading options...</div>';
-                    
-                    try {
-                        const response = await fetch('/api/sources/' + movieId);
-                        const data = await response.json();
-                        
-                        if (data && data.results && data.results.length > 0) {
-                            let html = '<h3 class="section-title">Stream & Download Options</h3>';
-                            html += '<div class="quality-options">';
-                            
-                            data.results.forEach(source => {
-                                const size = source.size ? (source.size / 1000000).toFixed(1) + ' MB' : '';
-                                const filename = movieTitle.replace(/[^a-z0-9]/gi, '_') + '_' + source.quality + '.mp4';
-                                
-                                html += \`
-                                    <div class="quality-card">
-                                        <div style="font-size: 18px; font-weight: bold; color: #00a8ff; margin-bottom: 5px;">
-                                            \${source.quality}
-                                        </div>
-                                        <div style="color: #aaa; margin-bottom: 15px;">
-                                            \${source.format || 'mp4'} • \${size}
-                                        </div>
-                                        <div style="display: flex; gap: 10px;">
-                                            <button class="btn-stream" style="flex: 1;" 
-                                                    onclick="playVideo('\${source.download_url}', '\${movieTitle} - \${source.quality}')">
-                                                ▶ Stream Now
-                                            </button>
-                                            <button class="btn-download" 
-                                                    onclick="downloadFile('\${source.download_url}', '\${filename}')">
-                                                ⬇
-                                            </button>
-                                        </div>
-                                    </div>
-                                \`;
-                            });
-                            
-                            html += '</div>';
-                            sourcesDiv.innerHTML = html;
-                        } else {
-                            sourcesDiv.innerHTML = '<div class="loading">❌ No sources available</div>';
-                        }
-                    } catch (error) {
-                        sourcesDiv.innerHTML = '<div class="loading">⚠️ Failed to load options</div>';
-                    }
-                }
-                
-                // Load on page start
-                window.onload = function() {
-                    loadSources('${movieId}', '${title}');
-                    autoPlayPreview('${movieId}', '${title}');
-                }
-            </script>
-        `;
-        
-        res.send(generateHTML(content, `${title} - Beraflix`));
-    } catch (error) {
-        const content = `
-            <div style="text-align: center; padding: 50px;">
-                <h2>❌ Movie Not Found</h2>
-                <p style="color: #aaa; margin: 20px 0;">The movie could not be loaded.</p>
-                <button class="btn" onclick="window.history.back()">← Go Back</button>
-            </div>
-        `;
-        res.send(generateHTML(content, 'Movie Not Found'));
-    }
-});
-
-// Series Detail Page (WITH FIXED EPISODE LOADING)
-app.get('/series/:id', async (req, res) => {
-    try {
-        const seriesId = req.params.id;
-        const info = await fetchAPI(`/info/${seriesId}`);
-        
-        if (!info || !info.results || !info.results.subject) {
-            throw new Error('Series not found');
-        }
-        
-        const series = info.results.subject;
-        const title = series.title || 'Unknown';
-        const year = series.releaseDate ? series.releaseDate.split('-')[0] : '';
-        const desc = series.description || 'No description available.';
-        const image = series.cover?.url || '';
-        const rating = series.imdbRatingValue || '';
-        
-        const content = `
-            <div style="max-width: 1200px; margin: 0 auto;">
-                <div style="display: flex; flex-wrap: wrap; gap: 30px; margin-bottom: 30px;">
-                    <div style="flex: 0 0 300px;">
-                        <img src="${image}" 
-                             style="width: 100%; border-radius: 10px;"
-                             onerror="this.src='https://via.placeholder.com/300x450/333/fff?text=Poster'">
-                    </div>
-                    
-                    <div style="flex: 1; min-width: 300px;">
-                        <h1 style="font-size: 32px; margin-bottom: 10px;">${title}</h1>
-                        
-                        <div style="color: #aaa; margin-bottom: 20px; display: flex; gap: 15px;">
-                            ${year ? `<span>📅 ${year}</span>` : ''}
-                            ${rating ? `<span>⭐ ${rating}/10</span>` : ''}
-                            <span>📺 TV Series</span>
-                        </div>
-                        
-                        <p style="line-height: 1.6; margin-bottom: 25px; font-size: 16px;">${desc}</p>
-                        
-                        <!-- SEASON SELECTION -->
-                        <div style="margin-bottom: 25px;">
-                            <h3 class="section-title">Select Season</h3>
-                            <div class="season-buttons">
-                                <button class="season-btn active" onclick="loadSeason(1, '${seriesId}', '${title}')">
-                                    Season 1
-                                </button>
-                                <button class="season-btn" onclick="loadSeason(2, '${seriesId}', '${title}')">
-                                    Season 2
-                                </button>
-                                <button class="season-btn" onclick="loadSeason(3, '${seriesId}', '${title}')">
-                                    Season 3
-                                </button>
-                                <button class="season-btn" onclick="loadSeason(4, '${seriesId}', '${title}')">
-                                    Season 4
-                                </button>
-                                <button class="season-btn" onclick="loadSeason(5, '${seriesId}', '${title}')">
-                                    Season 5
-                                </button>
-                            </div>
-                        </div>
-                        
-                        <!-- EPISODES WILL APPEAR HERE -->
-                        <div id="episodes">
-                            <div class="loading">
-                                <p>🔄 Loading Season 1 episodes...</p>
-                                <p style="color: #666; font-size: 14px; margin-top: 10px;">
-                                    <strong>New:</strong> Trying multiple season formats to find episodes
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <script>
-                // Update active season button
-                function setActiveSeason(seasonNum) {
-                    document.querySelectorAll('.season-btn').forEach(btn => {
-                        btn.classList.remove('active');
+self.addEventListener('fetch', (event) => {
+    event.respondWith(
+        caches.match(event.request).then((response) => {
+            return response || fetch(event.request).then((fetchResponse) => {
+                // Cache movie data for offline viewing
+                if (event.request.url.includes('/api/info/')) {
+                    const cacheCopy = fetchResponse.clone();
+                    caches.open('cloud-movies-data').then((cache) => {
+                        cache.put(event.request, cacheCopy);
                     });
-                    event.target.classList.add('active');
                 }
-                
-                // Load first season on start
-                window.onload = function() {
-                    loadSeason(1, '${seriesId}', '${title}');
-                }
-            </script>
-        `;
-        
-        res.send(generateHTML(content, `${title} - Beraflix`));
-    } catch (error) {
-        const content = `
-            <div style="text-align: center; padding: 50px;">
-                <h2>❌ Series Not Found</h2>
-                <p style="color: #aaa; margin: 20px 0;">The series could not be loaded.</p>
-                <button class="btn" onclick="window.history.back()">← Go Back</button>
-            </div>
-        `;
-        res.send(generateHTML(content, 'Series Not Found'));
-    }
+                return fetchResponse;
+            });
+        }).catch(() => {
+            // Return offline page for HTML requests
+            if (event.request.headers.get('accept').includes('text/html')) {
+                return caches.match('/');
+            }
+        })
+    );
 });
 
-// Search Page
-app.get('/search', async (req, res) => {
-    const query = req.query.q;
-    
-    if (!query) {
-        const content = `
-            <div style="text-align: center; padding: 40px;">
-                <h2>🔍 Search Movies & TV Series</h2>
-                <p style="color: #aaa; margin: 20px 0;">Enter a search term above</p>
-                <div style="display: flex; gap: 10px; justify-content: center; margin-top: 20px;">
-                    <button class="btn" onclick="searchMovies('siren')">Search: Siren</button>
-                    <button class="btn" onclick="searchMovies('avatar')">Search: Avatar</button>
-                </div>
-            </div>
-        `;
-        return res.send(generateHTML(content, 'Search'));
-    }
-    
-    try {
-        const results = await fetchAPI(`/search/${encodeURIComponent(query)}`);
-        
-        if (!results || !results.results || !results.results.items) {
-            throw new Error('No results');
-        }
-        
-        let content = `<h2 class="section-title">Results for "${query}"</h2>`;
-        content += `<div class="movies-grid">`;
-        
-        results.results.items.forEach(item => {
-            const type = item.subjectType === 2 ? 'series' : 'movie';
-            content += `
-                <div class="movie-card" onclick="viewDetail('${item.subjectId}', '${type}')">
-                    <img src="${item.cover?.url || ''}" class="movie-poster"
-                         onerror="this.src='https://via.placeholder.com/150x225/333/fff?text=Image'">
-                    <div class="movie-info">
-                        <div class="movie-title">${item.title || 'Untitled'}</div>
-                        <div class="movie-meta">
-                            ${item.releaseDate ? item.releaseDate.split('-')[0] : ''}
-                            ${item.subjectType === 2 ? ' • Series' : ''}
-                        </div>
-                    </div>
-                </div>
-            `;
-        });
-        
-        content += `</div>`;
-        res.send(generateHTML(content, `Search: ${query}`));
-    } catch (error) {
-        const content = `
-            <div style="text-align: center; padding: 40px;">
-                <h2>❌ No Results</h2>
-                <p style="color: #aaa; margin: 20px 0;">No results found for "${query}"</p>
-                <button class="btn" onclick="window.history.back()">← Go Back</button>
-            </div>
-        `;
-        res.send(generateHTML(content, 'No Results'));
-    }
+self.addEventListener('activate', (event) => {
+    const cacheWhitelist = ['cloud-movies-v1', 'cloud-movies-data'];
+    event.waitUntil(
+        caches.keys().then((cacheNames) => {
+            return Promise.all(
+                cacheNames.map((cacheName) => {
+                    if (!cacheWhitelist.includes(cacheName)) {
+                        return caches.delete(cacheName);
+                    }
+                })
+            );
+        })
+    );
 });
+`;
+}
 
-// API Endpoints
+// Generate PWA Manifest
+function generateManifest() {
+    return JSON.stringify({
+        "name": "CLOUD.MOVIES",
+        "short_name": "CloudMovies",
+        "description": "Bera Tech Premium Movie Streaming Platform",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#0f0f23",
+        "theme_color": "#6C63FF",
+        "orientation": "portrait-primary",
+        "icons": [
+            {
+                "src": "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22 fill=%22%236C63FF%22>🎬</text></svg>",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any"
+            }
+        ],
+        "categories": ["entertainment", "movies", "video"],
+        "shortcuts": [
+            {
+                "name": "Trending Movies",
+                "short_name": "Trending",
+                "description": "Browse trending movies",
+                "url": "/?section=trending"
+            },
+            {
+                "name": "Latest Releases",
+                "short_name": "Latest",
+                "description": "Watch latest movies",
+                "url": "/?section=latest"
+            }
+        ]
+    });
+}
+
+// API Routes
 app.get('/api/search/:query', async (req, res) => {
     try {
-        const data = await fetchAPI(`/search/${req.params.query}`);
-        res.json(data || { results: { items: [] } });
+        const { query } = req.params;
+        const apiUrl = `${GIFTED_API_BASE}/api/search/${encodeURIComponent(query)}`;
+        const data = await fetchFromAPI(apiUrl);
+        res.json({ success: true, data });
     } catch (error) {
-        res.json({ results: { items: [] } });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.get('/api/info/:id', async (req, res) => {
     try {
-        const data = await fetchAPI(`/info/${req.params.id}`);
-        res.json(data || { results: {} });
+        const { id } = req.params;
+        const apiUrl = `${GIFTED_API_BASE}/api/info/${id}`;
+        const data = await fetchFromAPI(apiUrl);
+        res.json({ success: true, data });
     } catch (error) {
-        res.json({ results: {} });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.get('/api/sources/:id', async (req, res) => {
     try {
-        const { season } = req.query;
-        let endpoint = `/sources/${req.params.id}`;
-        if (season) endpoint += `?season=${season}`;
+        const { id } = req.params;
+        const { season, episode } = req.query;
+        let apiUrl = `${GIFTED_API_BASE}/api/sources/${id}`;
         
-        const data = await fetchAPI(endpoint);
-        res.json(data || { results: [] });
+        if (season && episode) {
+            apiUrl += `?season=${season}&episode=${episode}`;
+        }
+        
+        const data = await fetchFromAPI(apiUrl);
+        res.json({ success: true, data });
     } catch (error) {
-        res.json({ results: [] });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Start Server
+app.get('/api/discover/:type', async (req, res) => {
+    try {
+        const { type } = req.params;
+        const searchTerms = {
+            featured: 'avengers',
+            trending: '2024',
+            latest: 'movie',
+            topRated: 'high'
+        };
+        
+        const apiUrl = `${GIFTED_API_BASE}/api/search/${encodeURIComponent(searchTerms[type] || 'movie')}`;
+        const data = await fetchFromAPI(apiUrl);
+        res.json({ success: true, data });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Streaming endpoint with quality selection
+app.get('/api/stream/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { quality = '360p' } = req.query;
+        
+        const sourcesUrl = `${GIFTED_API_BASE}/api/sources/${id}`;
+        const sourcesData = await fetchFromAPI(sourcesUrl);
+        
+        // Find appropriate quality stream
+        let streamUrl = null;
+        if (sourcesData && sourcesData.sources) {
+            // Sort by quality preference
+            const qualityOrder = { '720p': 3, '480p': 2, '360p': 1 };
+            const sortedSources = sourcesData.sources.sort((a, b) => 
+                (qualityOrder[b.quality] || 0) - (qualityOrder[a.quality] || 0)
+            );
+            
+            streamUrl = sortedSources[0]?.url;
+        }
+        
+        if (streamUrl) {
+            res.json({ success: true, url: streamUrl, quality });
+        } else {
+            res.status(404).json({ success: false, error: 'No stream available' });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Download endpoint
+app.get('/api/download/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { quality = '360p' } = req.query;
+        
+        const sourcesUrl = `${GIFTED_API_BASE}/api/sources/${id}`;
+        const sourcesData = await fetchFromAPI(sourcesUrl);
+        
+        let downloadUrl = null;
+        if (sourcesData && sourcesData.sources) {
+            const source = sourcesData.sources.find(s => s.quality === quality) || sourcesData.sources[0];
+            downloadUrl = source?.url;
+        }
+        
+        if (downloadUrl) {
+            // Proxy the download through our server
+            const response = await axios({
+                method: 'GET',
+                url: downloadUrl,
+                responseType: 'stream'
+            });
+            
+            res.setHeader('Content-Disposition', `attachment; filename="cloud-movie-${id}-${quality}.mp4"`);
+            res.setHeader('Content-Type', 'video/mp4');
+            
+            response.data.pipe(res);
+        } else {
+            res.status(404).json({ success: false, error: 'No download available' });
+        }
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Serve PWA files
+app.get('/manifest.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(generateManifest());
+});
+
+app.get('/sw.js', (req, res) => {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.send(generateServiceWorker());
+});
+
+// Serve the main application
+app.get('*', (req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.send(generateFrontend());
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Server error:', err);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+});
+
+// Start server
 app.listen(PORT, () => {
     console.log(`
-============================================
-🎬 BERAFLIX STREAMING PLATFORM v3.0
-============================================
-🚀 Server: http://localhost:${PORT}
-
-✨ NEW FEATURES:
-1. 🎥 LIVE VIDEO STREAMING - Click "▶ Play" to stream
-2. 📺 ENHANCED SERIES SUPPORT - Fixed episode loading
-3. 🔄 MULTI-FORMAT SEASON LOADING - Auto-detects seasons
-4. 📱 MOBILE OPTIMIZED - Works perfectly on phones
-5. 🎨 MODERN UI - Netflix-like interface
-
-🔍 TEST SEARCHES:
-• Search "siren" for TV series with streaming
-• Search "avatar" for movies with streaming
-• Click any series → Select Season → Stream episodes
-
-============================================
+    🚀 CLOUD.MOVIES Server Started!
+    📍 Port: ${PORT}
+    🌐 URL: http://localhost:${PORT}
+    
+    📱 PWA Enabled
+    🎬 Gifted Movies API Integrated
+    ⚡ Production Ready
+    
+    © 2024 Bera Tech - All rights reserved
     `);
 });
