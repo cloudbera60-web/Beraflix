@@ -19,7 +19,8 @@ app.use(express.urlencoded({ extended: true }));
 
 // Cache for trending content
 let trendingCache = { data: null, timestamp: 0 };
-const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+let featuredCache = { data: null, timestamp: 0 };
+const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
 
 // Serve static files
 app.use(express.static('public'));
@@ -67,7 +68,92 @@ app.get('/api/search/:query', async (req, res) => {
     }
 });
 
-// Get trending content with caching
+// Get featured content (variety of popular movies/shows)
+app.get('/api/featured', async (req, res) => {
+    try {
+        // Check cache
+        const now = Date.now();
+        if (featuredCache.data && (now - featuredCache.timestamp) < CACHE_DURATION) {
+            return res.json(featuredCache.data);
+        }
+        
+        // Different searches to get variety of content
+        const searches = [
+            '2024', 'action', 'comedy', 'drama', 'sci fi',
+            'animation', 'thriller', 'romance', 'adventure'
+        ];
+        
+        const randomSearches = [...searches]
+            .sort(() => 0.5 - Math.random())
+            .slice(0, 3);
+        
+        let allResults = [];
+        
+        // Fetch from multiple searches
+        for (const search of randomSearches) {
+            try {
+                const response = await fetch(`${API_BASE}/search/${encodeURIComponent(search)}`);
+                const data = await response.json();
+                
+                if (data.results && data.results.items) {
+                    const items = data.results.items.slice(0, 8).map(item => ({
+                        id: item.subjectId,
+                        title: item.title,
+                        description: item.description,
+                        year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
+                        type: item.subjectType === 1 ? 'movie' : 'tv',
+                        cover: item.cover?.url || item.thumbnail,
+                        poster: item.cover?.url || item.thumbnail,
+                        genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
+                        duration: item.duration,
+                        rating: item.imdbRatingValue,
+                        releaseDate: item.releaseDate,
+                        category: search
+                    }));
+                    allResults = [...allResults, ...items];
+                }
+                
+                // Small delay between requests
+                await new Promise(resolve => setTimeout(resolve, 100));
+            } catch (error) {
+                console.error(`Error fetching ${search}:`, error);
+            }
+        }
+        
+        // Remove duplicates
+        const uniqueResults = [];
+        const seenIds = new Set();
+        
+        for (const item of allResults) {
+            if (!seenIds.has(item.id)) {
+                seenIds.add(item.id);
+                uniqueResults.push(item);
+            }
+        }
+        
+        // Shuffle and limit to 20 items
+        const shuffledResults = uniqueResults
+            .sort(() => 0.5 - Math.random())
+            .slice(0, 20);
+        
+        const result = {
+            success: true,
+            results: shuffledResults,
+            categories: randomSearches,
+            timestamp: now
+        };
+        
+        // Update cache
+        featuredCache = { data: result, timestamp: now };
+        
+        res.json(result);
+    } catch (error) {
+        console.error('Featured error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch featured content' });
+    }
+});
+
+// Get trending content
 app.get('/api/trending', async (req, res) => {
     try {
         // Check cache
@@ -76,11 +162,8 @@ app.get('/api/trending', async (req, res) => {
             return res.json(trendingCache.data);
         }
         
-        // Popular searches to get trending content
-        const searches = ['movie', 'avengers', 'spider man', 'stranger things', 'fast and furious'];
-        const randomSearch = searches[Math.floor(Math.random() * searches.length)];
-        
-        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(randomSearch)}`);
+        // Search for trending content
+        const response = await fetch(`${API_BASE}/search/movie`);
         const data = await response.json();
         
         if (data.results && data.results.items) {
@@ -562,36 +645,50 @@ app.get('/', (req, res) => {
             main {
                 max-width: 1400px;
                 margin: 0 auto;
-                padding: 2rem;
+                padding: 0 2rem 2rem;
             }
             
-            .hero-section {
-                text-align: center;
-                padding: 5rem 2rem;
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 25px;
-                margin-bottom: 3rem;
-                border: 1px solid rgba(255, 255, 255, 0.1);
+            /* Hero Slider */
+            .hero-slider {
                 position: relative;
+                height: 500px;
+                border-radius: 25px;
                 overflow: hidden;
-                backdrop-filter: blur(10px);
+                margin-bottom: 3rem;
+                box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
             }
             
-            .hero-section::before {
-                content: '';
+            .slide {
                 position: absolute;
-                top: -50%;
-                left: -50%;
-                width: 200%;
-                height: 200%;
-                background: radial-gradient(circle, rgba(102, 126, 234, 0.1) 0%, transparent 70%);
-                animation: pulse 15s infinite linear;
-                z-index: -1;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                opacity: 0;
+                transition: opacity 1s ease;
+                background-size: cover;
+                background-position: center;
+                display: flex;
+                align-items: center;
+                padding: 0 4rem;
             }
             
-            .hero-title {
+            .slide.active {
+                opacity: 1;
+            }
+            
+            .slide-content {
+                max-width: 600px;
+                background: rgba(0, 0, 0, 0.7);
+                backdrop-filter: blur(20px);
+                padding: 3rem;
+                border-radius: 20px;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+            
+            .slide-title {
                 font-family: 'Montserrat', sans-serif;
-                font-size: 4rem;
+                font-size: 3rem;
                 margin-bottom: 1rem;
                 background: linear-gradient(45deg, #fff, var(--accent-blue), var(--accent-pink));
                 -webkit-background-clip: text;
@@ -599,115 +696,172 @@ app.get('/', (req, res) => {
                 background-size: 300% 300%;
                 animation: gradientShift 3s ease infinite;
                 font-weight: 800;
-                letter-spacing: 2px;
             }
             
-            .hero-subtitle {
-                font-size: 1.3rem;
+            .slide-description {
+                font-size: 1.2rem;
                 color: var(--text-secondary);
                 margin-bottom: 2rem;
-                font-weight: 300;
-                letter-spacing: 1px;
+                line-height: 1.6;
             }
             
-            /* Featured Tags */
-            .featured-tags {
+            .slide-meta {
                 display: flex;
-                justify-content: center;
+                gap: 1.5rem;
+                margin-bottom: 2rem;
+                flex-wrap: wrap;
+            }
+            
+            .meta-item {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                color: var(--text-secondary);
+            }
+            
+            .slide-actions {
+                display: flex;
                 gap: 1rem;
                 flex-wrap: wrap;
-                margin-top: 2rem;
             }
             
-            .featured-tag {
-                padding: 8px 20px;
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 25px;
-                font-size: 0.9rem;
+            .slide-btn {
+                padding: 14px 28px;
+                border: none;
+                border-radius: 12px;
+                font-weight: 600;
                 cursor: pointer;
                 transition: all 0.3s ease;
-                border: 1px solid transparent;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                font-family: 'Poppins', sans-serif;
+                font-size: 1rem;
+            }
+            
+            .watch-btn {
+                background: var(--primary-gradient);
+                color: white;
+                box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+            }
+            
+            .info-btn {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.3);
                 backdrop-filter: blur(10px);
             }
             
-            .featured-tag:hover {
+            .slide-btn:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 15px 30px rgba(0, 0, 0, 0.4);
+            }
+            
+            .slider-controls {
+                position: absolute;
+                bottom: 2rem;
+                right: 2rem;
+                display: flex;
+                gap: 1rem;
+                z-index: 10;
+            }
+            
+            .slider-btn {
+                background: rgba(0, 0, 0, 0.5);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                color: white;
+                width: 50px;
+                height: 50px;
+                border-radius: 50%;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 1.2rem;
+                transition: all 0.3s ease;
+                backdrop-filter: blur(10px);
+            }
+            
+            .slider-btn:hover {
+                background: var(--primary-gradient);
+                transform: scale(1.1);
+            }
+            
+            .slider-dots {
+                position: absolute;
+                bottom: 2rem;
+                left: 50%;
+                transform: translateX(-50%);
+                display: flex;
+                gap: 10px;
+                z-index: 10;
+            }
+            
+            .slider-dot {
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: rgba(255, 255, 255, 0.3);
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            
+            .slider-dot.active {
+                background: var(--accent-blue);
+                transform: scale(1.3);
+                box-shadow: 0 0 10px var(--accent-blue);
+            }
+            
+            /* Category Sections */
+            .category-section {
+                margin-bottom: 4rem;
+            }
+            
+            .section-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 2rem;
+            }
+            
+            .section-title {
+                font-family: 'Montserrat', sans-serif;
+                font-size: 2.2rem;
+                font-weight: 700;
+                color: white;
+                display: flex;
+                align-items: center;
+                gap: 15px;
+            }
+            
+            .section-title i {
+                color: var(--accent-blue);
+                font-size: 1.8rem;
+            }
+            
+            .view-all {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                color: white;
+                padding: 10px 20px;
+                border-radius: 25px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                font-family: 'Poppins', sans-serif;
+                font-weight: 500;
+                backdrop-filter: blur(10px);
+            }
+            
+            .view-all:hover {
                 background: var(--primary-gradient);
                 transform: translateY(-3px);
                 box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
             }
             
-            /* Genre Navigation */
-            .genre-nav {
-                display: flex;
-                gap: 1rem;
-                margin-bottom: 3rem;
-                overflow-x: auto;
-                padding: 1.5rem;
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 20px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                backdrop-filter: blur(10px);
-                scrollbar-width: thin;
-                scrollbar-color: var(--accent-blue) transparent;
-            }
-            
-            .genre-nav::-webkit-scrollbar {
-                height: 6px;
-            }
-            
-            .genre-nav::-webkit-scrollbar-track {
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 3px;
-            }
-            
-            .genre-nav::-webkit-scrollbar-thumb {
-                background: var(--primary-gradient);
-                border-radius: 3px;
-            }
-            
-            .genre-btn {
-                padding: 12px 28px;
-                background: rgba(255, 255, 255, 0.08);
-                border: 2px solid transparent;
-                border-radius: 50px;
-                color: var(--text-primary);
-                cursor: pointer;
-                white-space: nowrap;
-                transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-                font-family: 'Poppins', sans-serif;
-                font-weight: 500;
-                letter-spacing: 0.5px;
-                backdrop-filter: blur(10px);
-                position: relative;
-                overflow: hidden;
-            }
-            
-            .genre-btn::before {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: -100%;
-                width: 100%;
-                height: 100%;
-                background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-                transition: left 0.5s ease;
-            }
-            
-            .genre-btn:hover::before {
-                left: 100%;
-            }
-            
-            .genre-btn:hover, .genre-btn.active {
-                background: var(--primary-gradient);
-                border-color: var(--accent-blue);
-                transform: translateY(-5px) scale(1.05);
-                box-shadow: 0 15px 30px rgba(102, 126, 234, 0.4);
-            }
-            
             /* Content Grid */
             .content-grid {
                 display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+                grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
                 gap: 2rem;
                 margin-bottom: 3rem;
             }
@@ -813,6 +967,41 @@ app.get('/', (req, res) => {
                 gap: 5px;
             }
             
+            /* Quick Categories */
+            .quick-categories {
+                display: flex;
+                gap: 1rem;
+                margin-bottom: 3rem;
+                overflow-x: auto;
+                padding: 1rem 0;
+                scrollbar-width: thin;
+            }
+            
+            .quick-category {
+                padding: 12px 28px;
+                background: rgba(255, 255, 255, 0.08);
+                border: 2px solid transparent;
+                border-radius: 50px;
+                color: var(--text-primary);
+                cursor: pointer;
+                white-space: nowrap;
+                transition: all 0.3s ease;
+                font-family: 'Poppins', sans-serif;
+                font-weight: 500;
+                letter-spacing: 0.5px;
+                backdrop-filter: blur(10px);
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            
+            .quick-category:hover, .quick-category.active {
+                background: var(--primary-gradient);
+                border-color: var(--accent-blue);
+                transform: translateY(-3px);
+                box-shadow: 0 15px 30px rgba(102, 126, 234, 0.3);
+            }
+            
             /* Modal Styles */
             .modal {
                 display: none;
@@ -897,24 +1086,7 @@ app.get('/', (req, res) => {
                 padding: 2.5rem;
             }
             
-            /* Player */
-            .video-container {
-                width: 100%;
-                margin: 0 auto 3rem;
-                background: #000;
-                border-radius: 15px;
-                overflow: hidden;
-                position: relative;
-                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
-            }
-            
-            #video-player {
-                width: 100%;
-                height: 500px;
-                background: #000;
-            }
-            
-            /* Episode Selection */
+            /* Episode Selection - FIXED */
             .episode-section {
                 background: rgba(255, 255, 255, 0.03);
                 border-radius: 20px;
@@ -954,8 +1126,15 @@ app.get('/', (req, res) => {
                 margin-top: 1.5rem;
             }
             
+            .episode-item {
+                position: relative;
+            }
+            
             .episode-checkbox {
-                display: none;
+                position: absolute;
+                opacity: 0;
+                width: 0;
+                height: 0;
             }
             
             .episode-label {
@@ -967,6 +1146,7 @@ app.get('/', (req, res) => {
                 transition: all 0.3s ease;
                 border: 2px solid transparent;
                 display: block;
+                position: relative;
             }
             
             .episode-checkbox:checked + .episode-label {
@@ -981,10 +1161,40 @@ app.get('/', (req, res) => {
                 transform: translateY(-3px);
             }
             
+            .episode-label::after {
+                content: '✓';
+                position: absolute;
+                top: 5px;
+                right: 5px;
+                width: 20px;
+                height: 20px;
+                background: var(--accent-blue);
+                color: white;
+                border-radius: 50%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 12px;
+                opacity: 0;
+                transition: opacity 0.3s ease;
+            }
+            
+            .episode-checkbox:checked + .episode-label::after {
+                opacity: 1;
+            }
+            
+            .batch-controls {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-top: 2rem;
+                flex-wrap: wrap;
+                gap: 1rem;
+            }
+            
             .batch-actions {
                 display: flex;
                 gap: 1rem;
-                margin-top: 2rem;
                 flex-wrap: wrap;
             }
             
@@ -1001,6 +1211,11 @@ app.get('/', (req, res) => {
                 font-family: 'Poppins', sans-serif;
             }
             
+            .batch-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            
             .batch-play {
                 background: var(--primary-gradient);
                 color: white;
@@ -1011,7 +1226,26 @@ app.get('/', (req, res) => {
                 color: white;
             }
             
-            .batch-btn:hover {
+            .select-all-btn {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                color: white;
+                padding: 10px 20px;
+                border-radius: 10px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                backdrop-filter: blur(10px);
+            }
+            
+            .select-all-btn:hover {
+                background: rgba(255, 255, 255, 0.2);
+                transform: translateY(-2px);
+            }
+            
+            .batch-btn:hover:not(:disabled), .select-all-btn:hover {
                 transform: translateY(-3px);
                 box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
             }
@@ -1114,42 +1348,21 @@ app.get('/', (req, res) => {
                 box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
             }
             
-            /* Cast Section */
-            .cast-section {
-                margin: 3rem 0;
-            }
-            
-            .cast-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-                gap: 1.5rem;
-                margin-top: 1.5rem;
-            }
-            
-            .cast-card {
-                background: rgba(255, 255, 255, 0.05);
+            /* Video Container */
+            .video-container {
+                width: 100%;
+                margin: 0 auto 3rem;
+                background: #000;
                 border-radius: 15px;
-                padding: 1.5rem;
-                text-align: center;
-                transition: all 0.3s ease;
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                overflow: hidden;
+                position: relative;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
             }
             
-            .cast-card:hover {
-                transform: translateY(-10px);
-                background: rgba(102, 126, 234, 0.15);
-                border-color: var(--accent-blue);
-                box-shadow: 0 15px 30px rgba(102, 126, 234, 0.2);
-            }
-            
-            .cast-avatar {
-                width: 100px;
-                height: 100px;
-                border-radius: 50%;
-                object-fit: cover;
-                margin: 0 auto 1rem;
-                border: 3px solid var(--accent-blue);
-                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+            #video-player {
+                width: 100%;
+                height: 500px;
+                background: #000;
             }
             
             /* Footer */
@@ -1302,12 +1515,21 @@ app.get('/', (req, res) => {
             
             /* Responsive */
             @media (max-width: 1024px) {
-                .content-grid {
-                    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+                .hero-slider {
+                    height: 400px;
                 }
                 
-                .hero-title {
-                    font-size: 3rem;
+                .slide-content {
+                    padding: 2rem;
+                    max-width: 500px;
+                }
+                
+                .slide-title {
+                    font-size: 2.5rem;
+                }
+                
+                .content-grid {
+                    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
                 }
             }
             
@@ -1321,8 +1543,25 @@ app.get('/', (req, res) => {
                     width: 100%;
                 }
                 
-                .hero-title {
-                    font-size: 2.5rem;
+                .hero-slider {
+                    height: 350px;
+                }
+                
+                .slide {
+                    padding: 0 2rem;
+                }
+                
+                .slide-content {
+                    padding: 1.5rem;
+                    max-width: 100%;
+                }
+                
+                .slide-title {
+                    font-size: 2rem;
+                }
+                
+                .slide-description {
+                    font-size: 1rem;
                 }
                 
                 .logo-text {
@@ -1339,7 +1578,7 @@ app.get('/', (req, res) => {
                     border-radius: 0;
                 }
                 
-                .video-container {
+                #video-player {
                     height: 300px;
                 }
                 
@@ -1353,8 +1592,29 @@ app.get('/', (req, res) => {
             }
             
             @media (max-width: 480px) {
-                .hero-title {
-                    font-size: 2rem;
+                .hero-slider {
+                    height: 300px;
+                }
+                
+                .slide {
+                    padding: 0 1rem;
+                }
+                
+                .slide-content {
+                    padding: 1rem;
+                }
+                
+                .slide-title {
+                    font-size: 1.8rem;
+                }
+                
+                .slide-actions {
+                    flex-direction: column;
+                }
+                
+                .slide-btn {
+                    width: 100%;
+                    justify-content: center;
                 }
                 
                 .logo-text {
@@ -1366,11 +1626,15 @@ app.get('/', (req, res) => {
                     gap: 1rem;
                 }
                 
-                .genre-nav {
-                    padding: 1rem;
+                .section-title {
+                    font-size: 1.8rem;
                 }
                 
-                .genre-btn {
+                .quick-categories {
+                    gap: 0.8rem;
+                }
+                
+                .quick-category {
                     padding: 10px 20px;
                     font-size: 0.9rem;
                 }
@@ -1433,36 +1697,51 @@ app.get('/', (req, res) => {
 
         <!-- Main Content -->
         <main>
-            <section class="hero-section">
-                <h1 class="hero-title">Unlimited Entertainment</h1>
-                <p class="hero-subtitle">Stream the latest movies and TV series in stunning quality</p>
-                <div style="margin-top: 3rem;">
-                    <input type="text" id="home-search" placeholder="Try 'Avengers', 'Stranger Things', 'The Matrix'..." 
-                           style="width: 100%; max-width: 600px; padding: 18px 30px; border-radius: 50px; border: 2px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1); color: white; font-size: 1.1rem; backdrop-filter: blur(10px);">
-                </div>
-                <div class="featured-tags">
-                    <div class="featured-tag" data-search="action">🔥 Action</div>
-                    <div class="featured-tag" data-search="comedy">😄 Comedy</div>
-                    <div class="featured-tag" data-search="sci-fi">🚀 Sci-Fi</div>
-                    <div class="featured-tag" data-search="drama">🎭 Drama</div>
-                    <div class="featured-tag" data-search="2024">🎬 2024 Releases</div>
-                </div>
-            </section>
+            <!-- Hero Slider -->
+            <div class="hero-slider" id="hero-slider">
+                <!-- Slides will be populated by JavaScript -->
+            </div>
 
-            <!-- Genre Navigation -->
-            <nav class="genre-nav" id="genre-nav">
-                <!-- Genres will be populated by JavaScript -->
-            </nav>
+            <!-- Quick Categories -->
+            <div class="quick-categories" id="quick-categories">
+                <!-- Categories will be populated by JavaScript -->
+            </div>
 
-            <!-- Content Grid -->
+            <!-- Featured Movies Section -->
+            <div class="category-section" id="featured-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <i class="fas fa-fire"></i>
+                        Featured Movies
+                    </h2>
+                    <button class="view-all" onclick="loadMoreFeatured()">
+                        View All <i class="fas fa-arrow-right"></i>
+                    </button>
+                </div>
+                <div class="content-grid" id="featured-grid">
+                    <!-- Featured content will be populated by JavaScript -->
+                </div>
+            </div>
+
+            <!-- Trending Section -->
+            <div class="category-section" id="trending-section">
+                <div class="section-header">
+                    <h2 class="section-title">
+                        <i class="fas fa-chart-line"></i>
+                        Trending Now
+                    </h2>
+                    <button class="view-all" onclick="loadMoreTrending()">
+                        View All <i class="fas fa-arrow-right"></i>
+                    </button>
+                </div>
+                <div class="content-grid" id="trending-grid">
+                    <!-- Trending content will be populated by JavaScript -->
+                </div>
+            </div>
+
+            <!-- All Content Grid -->
             <div class="content-grid" id="content-grid">
-                <!-- Skeleton loading -->
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
+                <!-- Content will be populated by JavaScript -->
             </div>
 
             <!-- Pagination -->
@@ -1534,6 +1813,8 @@ app.get('/', (req, res) => {
             let selectedEpisodes = new Set();
             let selectedQuality = '720p';
             let movieDetails = null;
+            let sliderInterval = null;
+            let currentSlide = 0;
 
             // Working genres based on API data
             const genres = [
@@ -1549,8 +1830,7 @@ app.get('/', (req, res) => {
                 { id: 'animation', name: 'Animation', icon: 'fas fa-dragon' },
                 { id: 'fantasy', name: 'Fantasy', icon: 'fas fa-wand-sparkles' },
                 { id: 'crime', name: 'Crime', icon: 'fas fa-user-secret' },
-                { id: 'mystery', name: 'Mystery', icon: 'fas fa-magnifying-glass' },
-                { id: 'family', name: 'Family', icon: 'fas fa-house' }
+                { id: 'mystery', name: 'Mystery', icon: 'fas fa-magnifying-glass' }
             ];
 
             // Initialize
@@ -1563,173 +1843,275 @@ app.get('/', (req, res) => {
                     }, 500);
                 }, 1500);
 
-                // Initialize genres
-                initializeGenres();
-                
                 // Initialize search functionality
                 initializeSearch();
                 
-                // Load trending content
-                await loadTrendingContent();
+                // Load homepage content
+                await loadHomepageContent();
                 
                 // Initialize PWA
                 initializePWA();
-                
-                // Setup home search
-                setupHomeSearch();
-                
-                // Setup featured tags
-                setupFeaturedTags();
             });
 
-            // Initialize genres navigation
-            function initializeGenres() {
-                const genreNav = document.getElementById('genre-nav');
-                genres.forEach(genre => {
-                    const button = document.createElement('button');
-                    button.className = 'genre-btn';
-                    if (genre.id === 'all') button.classList.add('active');
-                    button.innerHTML = `<i class="${genre.icon}"></i> ${genre.name}`;
-                    button.addEventListener('click', () => filterByGenre(genre.id));
-                    genreNav.appendChild(button);
-                });
-            }
-
-            // Filter content by genre
-            function filterByGenre(genreId) {
-                currentGenre = genreId;
-                
-                // Update active genre button
-                document.querySelectorAll('.genre-btn').forEach(btn => {
-                    btn.classList.remove('active');
-                    if (btn.querySelector('i').className.includes(genreId) || genreId === 'all') {
-                        btn.classList.add('active');
+            // Load homepage content
+            async function loadHomepageContent() {
+                try {
+                    // Load featured content for slider and grid
+                    const featuredResponse = await fetch('/api/featured');
+                    const featuredData = await featuredResponse.json();
+                    
+                    if (featuredData.success) {
+                        // Setup hero slider with top 5 featured items
+                        const sliderItems = featuredData.results.slice(0, 5);
+                        setupHeroSlider(sliderItems);
+                        
+                        // Display featured grid
+                        displayFeaturedGrid(featuredData.results.slice(0, 12));
                     }
-                });
-                
-                if (currentGenre === 'all') {
-                    displayContent(currentContent);
-                } else {
-                    const filtered = currentContent.filter(item => 
-                        item.genre && item.genre.some(g => 
-                            g.toLowerCase().includes(currentGenre)
-                        )
-                    );
-                    displayContent(filtered);
+                    
+                    // Load trending content
+                    const trendingResponse = await fetch('/api/trending');
+                    const trendingData = await trendingResponse.json();
+                    
+                    if (trendingData.success) {
+                        // Display trending grid
+                        displayTrendingGrid(trendingData.results.slice(0, 12));
+                        
+                        // Set current content for genre filtering
+                        currentContent = trendingData.results;
+                        displayContentGrid(trendingData.results.slice(0, 24));
+                    }
+                    
+                    // Setup quick categories
+                    setupQuickCategories();
+                    
+                } catch (error) {
+                    console.error('Error loading homepage:', error);
+                    showError('Failed to load content. Please refresh the page.');
                 }
             }
 
-            // Setup home search
-            function setupHomeSearch() {
-                const homeSearch = document.getElementById('home-search');
-                homeSearch.addEventListener('keypress', async (e) => {
-                    if (e.key === 'Enter') {
-                        const query = e.target.value.trim();
-                        if (query) {
-                            document.getElementById('search-input').value = query;
-                            await performSearch(query);
-                        }
-                    }
-                });
+            // Setup hero slider
+            function setupHeroSlider(items) {
+                const slider = document.getElementById('hero-slider');
+                
+                if (!items || items.length === 0) {
+                    slider.innerHTML = `
+                        <div class="slide active" style="background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));">
+                            <div class="slide-content">
+                                <h2 class="slide-title">Welcome to CLOUD.MOVIES</h2>
+                                <p class="slide-description">Stream thousands of movies and TV series in stunning quality</p>
+                                <div class="slide-meta">
+                                    <div class="meta-item">
+                                        <i class="fas fa-film"></i>
+                                        <span>Premium Streaming</span>
+                                    </div>
+                                    <div class="meta-item">
+                                        <i class="fas fa-hd"></i>
+                                        <span>HD Quality</span>
+                                    </div>
+                                    <div class="meta-item">
+                                        <i class="fas fa-globe"></i>
+                                        <span>Global Content</span>
+                                    </div>
+                                </div>
+                                <div class="slide-actions">
+                                    <button class="slide-btn watch-btn" onclick="performSearch('movie')">
+                                        <i class="fas fa-play"></i>
+                                        <span>Browse Movies</span>
+                                    </button>
+                                    <button class="slide-btn info-btn" onclick="performSearch('tv')">
+                                        <i class="fas fa-info-circle"></i>
+                                        <span>Explore Series</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                // Create slides
+                slider.innerHTML = items.map((item, index) => `
+                    <div class="slide ${index === 0 ? 'active' : ''}" 
+                         style="background-image: linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url('${item.cover || item.poster || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?auto=format&fit=crop&w=1600&q=80'}');">
+                        <div class="slide-content">
+                            <h2 class="slide-title">${item.title}</h2>
+                            <p class="slide-description">${item.description || 'An exciting movie available for streaming now'}</p>
+                            <div class="slide-meta">
+                                ${item.year ? `
+                                    <div class="meta-item">
+                                        <i class="fas fa-calendar"></i>
+                                        <span>${item.year}</span>
+                                    </div>
+                                ` : ''}
+                                ${item.type ? `
+                                    <div class="meta-item">
+                                        <i class="fas fa-${item.type === 'tv' ? 'tv' : 'film'}"></i>
+                                        <span>${item.type === 'tv' ? 'TV Series' : 'Movie'}</span>
+                                    </div>
+                                ` : ''}
+                                ${item.rating ? `
+                                    <div class="meta-item">
+                                        <i class="fas fa-star"></i>
+                                        <span>${item.rating}/10</span>
+                                    </div>
+                                ` : ''}
+                            </div>
+                            <div class="slide-actions">
+                                <button class="slide-btn watch-btn" onclick="showDetails('${item.id}')">
+                                    <i class="fas fa-play"></i>
+                                    <span>Watch Now</span>
+                                </button>
+                                <button class="slide-btn info-btn" onclick="showDetails('${item.id}')">
+                                    <i class="fas fa-info-circle"></i>
+                                    <span>More Info</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+                
+                // Add slider controls
+                slider.innerHTML += `
+                    <div class="slider-controls">
+                        <button class="slider-btn prev-btn" onclick="prevSlide()">
+                            <i class="fas fa-chevron-left"></i>
+                        </button>
+                        <button class="slider-btn next-btn" onclick="nextSlide()">
+                            <i class="fas fa-chevron-right"></i>
+                        </button>
+                    </div>
+                    <div class="slider-dots">
+                        ${items.map((_, index) => `
+                            <div class="slider-dot ${index === 0 ? 'active' : ''}" onclick="goToSlide(${index})"></div>
+                        `).join('')}
+                    </div>
+                `;
+                
+                // Start auto-slide
+                startAutoSlide();
             }
 
-            // Setup featured tags
-            function setupFeaturedTags() {
-                document.querySelectorAll('.featured-tag').forEach(tag => {
-                    tag.addEventListener('click', async () => {
-                        const search = tag.dataset.search;
-                        document.getElementById('home-search').value = search;
-                        document.getElementById('search-input').value = search;
+            // Slider functions
+            function startAutoSlide() {
+                if (sliderInterval) clearInterval(sliderInterval);
+                
+                sliderInterval = setInterval(() => {
+                    nextSlide();
+                }, 5000);
+            }
+
+            function nextSlide() {
+                const slides = document.querySelectorAll('.slide');
+                const dots = document.querySelectorAll('.slider-dot');
+                
+                if (slides.length === 0) return;
+                
+                slides[currentSlide].classList.remove('active');
+                if (dots[currentSlide]) dots[currentSlide].classList.remove('active');
+                
+                currentSlide = (currentSlide + 1) % slides.length;
+                
+                slides[currentSlide].classList.add('active');
+                if (dots[currentSlide]) dots[currentSlide].classList.add('active');
+            }
+
+            function prevSlide() {
+                const slides = document.querySelectorAll('.slide');
+                const dots = document.querySelectorAll('.slider-dot');
+                
+                if (slides.length === 0) return;
+                
+                slides[currentSlide].classList.remove('active');
+                if (dots[currentSlide]) dots[currentSlide].classList.remove('active');
+                
+                currentSlide = (currentSlide - 1 + slides.length) % slides.length;
+                
+                slides[currentSlide].classList.add('active');
+                if (dots[currentSlide]) dots[currentSlide].classList.add('active');
+            }
+
+            function goToSlide(index) {
+                const slides = document.querySelectorAll('.slide');
+                const dots = document.querySelectorAll('.slider-dot');
+                
+                if (slides.length === 0 || index < 0 || index >= slides.length) return;
+                
+                slides[currentSlide].classList.remove('active');
+                if (dots[currentSlide]) dots[currentSlide].classList.remove('active');
+                
+                currentSlide = index;
+                
+                slides[currentSlide].classList.add('active');
+                if (dots[currentSlide]) dots[currentSlide].classList.add('active');
+            }
+
+            // Setup quick categories
+            function setupQuickCategories() {
+                const categoriesContainer = document.getElementById('quick-categories');
+                
+                const quickCategories = [
+                    { name: 'New Releases', icon: 'fas fa-rocket', search: '2024' },
+                    { name: 'Action', icon: 'fas fa-explosion', search: 'action' },
+                    { name: 'Comedy', icon: 'fas fa-laugh', search: 'comedy' },
+                    { name: 'Drama', icon: 'fas fa-masks-theater', search: 'drama' },
+                    { name: 'Sci-Fi', icon: 'fas fa-robot', search: 'sci fi' },
+                    { name: 'Horror', icon: 'fas fa-ghost', search: 'horror' },
+                    { name: 'Romance', icon: 'fas fa-heart', search: 'romance' },
+                    { name: 'Animation', icon: 'fas fa-dragon', search: 'animation' }
+                ];
+                
+                categoriesContainer.innerHTML = quickCategories.map(cat => `
+                    <div class="quick-category" data-search="${cat.search}">
+                        <i class="${cat.icon}"></i>
+                        <span>${cat.name}</span>
+                    </div>
+                `).join('');
+                
+                // Add click event listeners
+                categoriesContainer.querySelectorAll('.quick-category').forEach(cat => {
+                    cat.addEventListener('click', async () => {
+                        const search = cat.dataset.search;
+                        
+                        // Update active state
+                        categoriesContainer.querySelectorAll('.quick-category').forEach(c => 
+                            c.classList.remove('active')
+                        );
+                        cat.classList.add('active');
+                        
                         await performSearch(search);
                     });
                 });
             }
 
-            // Initialize search functionality
-            function initializeSearch() {
-                const searchInput = document.getElementById('search-input');
-                const searchBtn = document.getElementById('search-btn');
-                
-                searchBtn.addEventListener('click', async () => {
-                    const query = searchInput.value.trim();
-                    if (query) {
-                        await performSearch(query);
-                    }
-                });
-                
-                searchInput.addEventListener('keypress', async (e) => {
-                    if (e.key === 'Enter') {
-                        const query = e.target.value.trim();
-                        if (query) {
-                            await performSearch(query);
-                        }
-                    }
-                });
+            // Display featured grid
+            function displayFeaturedGrid(items) {
+                const grid = document.getElementById('featured-grid');
+                displayContentInGrid(grid, items.slice(0, 6));
             }
 
-            // Load trending content
-            async function loadTrendingContent() {
-                showSkeletonLoading();
-                try {
-                    const response = await fetch('/api/trending');
-                    const data = await response.json();
-                    
-                    if (data.success && data.results.length > 0) {
-                        currentContent = data.results;
-                        displayContent(data.results);
-                    } else {
-                        // Fallback search
-                        await performSearch('movie');
-                    }
-                } catch (error) {
-                    console.error('Error loading content:', error);
-                    showError('Failed to load content. Please try again.');
-                }
+            // Display trending grid
+            function displayTrendingGrid(items) {
+                const grid = document.getElementById('trending-grid');
+                displayContentInGrid(grid, items.slice(0, 6));
             }
 
-            // Perform search
-            async function performSearch(query) {
-                showSkeletonLoading();
-                currentSearch = query;
-                currentPage = 1;
-                
-                try {
-                    const response = await fetch(`/api/search/${encodeURIComponent(query)}`);
-                    const data = await response.json();
-                    
-                    if (data.success) {
-                        currentContent = data.results;
-                        displayContent(data.results);
-                        updatePagination(data.pagination);
-                        
-                        // Scroll to content
-                        document.querySelector('.content-grid').scrollIntoView({ 
-                            behavior: 'smooth' 
-                        });
-                        
-                        // Update home search field
-                        document.getElementById('home-search').value = query;
-                    } else {
-                        showError('No results found. Try another search.');
-                    }
-                } catch (error) {
-                    console.error('Search error:', error);
-                    showError('Search failed. Please try again.');
-                }
+            // Display content grid
+            function displayContentGrid(items) {
+                const grid = document.getElementById('content-grid');
+                displayContentInGrid(grid, items);
             }
 
             // Display content in grid
-            function displayContent(items) {
-                const grid = document.getElementById('content-grid');
-                
+            function displayContentInGrid(grid, items) {
                 if (!items || items.length === 0) {
                     grid.innerHTML = `
-                        <div style="grid-column: 1/-1; text-align: center; padding: 4rem;">
-                            <div style="font-size: 5rem; color: var(--text-secondary); opacity: 0.3; margin-bottom: 1rem;">
+                        <div style="grid-column: 1/-1; text-align: center; padding: 3rem;">
+                            <div style="font-size: 4rem; color: var(--text-secondary); opacity: 0.3; margin-bottom: 1rem;">
                                 <i class="fas fa-film"></i>
                             </div>
-                            <h3 style="color: var(--text-secondary); margin-bottom: 1rem;">No Content Found</h3>
-                            <p style="color: var(--text-secondary); opacity: 0.7;">Try searching for something else</p>
+                            <p style="color: var(--text-secondary);">No content found</p>
                         </div>
                     `;
                     return;
@@ -1773,6 +2155,61 @@ app.get('/', (req, res) => {
                 });
             }
 
+            // Initialize search functionality
+            function initializeSearch() {
+                const searchInput = document.getElementById('search-input');
+                const searchBtn = document.getElementById('search-btn');
+                
+                searchBtn.addEventListener('click', async () => {
+                    const query = searchInput.value.trim();
+                    if (query) {
+                        await performSearch(query);
+                    }
+                });
+                
+                searchInput.addEventListener('keypress', async (e) => {
+                    if (e.key === 'Enter') {
+                        const query = e.target.value.trim();
+                        if (query) {
+                            await performSearch(query);
+                        }
+                    }
+                });
+            }
+
+            // Perform search
+            async function performSearch(query) {
+                showSkeletonLoading();
+                currentSearch = query;
+                currentPage = 1;
+                
+                try {
+                    const response = await fetch(`/api/search/${encodeURIComponent(query)}`);
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        currentContent = data.results;
+                        displayContentGrid(data.results);
+                        updatePagination(data.pagination);
+                        
+                        // Hide category sections and show search results
+                        document.getElementById('featured-section').style.display = 'none';
+                        document.getElementById('trending-section').style.display = 'none';
+                        document.getElementById('content-grid').style.display = 'grid';
+                        
+                        // Scroll to content
+                        document.getElementById('content-grid').scrollIntoView({ 
+                            behavior: 'smooth' 
+                        });
+                    } else {
+                        showError('No results found. Try another search.');
+                    }
+                } catch (error) {
+                    console.error('Search error:', error);
+                    showError('Search failed. Please try again.');
+                }
+            }
+
             // Show content details
             async function showDetails(id) {
                 showModalLoading();
@@ -1795,7 +2232,7 @@ app.get('/', (req, res) => {
                 }
             }
 
-            // Display details in modal
+            // Display details in modal - FIXED EPISODE SELECTION
             function displayDetails(movie) {
                 const modal = document.getElementById('detail-modal');
                 const modalBody = document.getElementById('modal-body');
@@ -1807,7 +2244,7 @@ app.get('/', (req, res) => {
                 const isTV = movie.type === 'tv';
                 const hasEpisodes = movie.episodes && movie.episodes.length > 0;
                 
-                // Build episodes HTML if available
+                // Build episodes HTML if available - FIXED
                 let episodesHtml = '';
                 if (hasEpisodes) {
                     const seasons = [...new Set(movie.episodes.map(ep => ep.season))];
@@ -1836,22 +2273,22 @@ app.get('/', (req, res) => {
                             </div>
                             
                             <div id="episode-container" style="display: none;">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                                    <h4>Episodes</h4>
-                                    <button id="select-all-btn" class="batch-btn batch-play" style="padding: 8px 16px; font-size: 0.9rem;">
-                                        <i class="fas fa-check-double"></i> Select All
-                                    </button>
+                                <div class="batch-controls">
+                                    <div>
+                                        <button id="select-all-btn" class="select-all-btn">
+                                            <i class="fas fa-check-double"></i> Select All
+                                        </button>
+                                    </div>
+                                    <div class="batch-actions">
+                                        <button id="batch-play-btn" class="batch-btn batch-play" disabled>
+                                            <i class="fas fa-play-circle"></i> Play Selected
+                                        </button>
+                                        <button id="batch-download-btn" class="batch-btn batch-download" disabled>
+                                            <i class="fas fa-download"></i> Download
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="episode-grid" id="episode-grid"></div>
-                                
-                                <div class="batch-actions">
-                                    <button id="batch-play-btn" class="batch-btn batch-play" disabled>
-                                        <i class="fas fa-play-circle"></i> Play Selected (0)
-                                    </button>
-                                    <button id="batch-download-btn" class="batch-btn batch-download" disabled>
-                                        <i class="fas fa-download"></i> Download Selected (0)
-                                    </button>
-                                </div>
                             </div>
                         </div>
                     `;
@@ -1864,7 +2301,7 @@ app.get('/', (req, res) => {
                         <div class="cast-section">
                             <h3><i class="fas fa-users"></i> Cast & Crew</h3>
                             <div class="cast-grid">
-                                ${movie.cast.slice(0, 8).map(person => `
+                                ${movie.cast.slice(0, 6).map(person => `
                                     <div class="cast-card">
                                         <img src="${person.avatar || 'https://images.unsplash.com/photo-1494790108755-2616b612b786?auto=format&fit=crop&w=200&q=80'}" 
                                              alt="${person.name}" 
@@ -1944,16 +2381,6 @@ app.get('/', (req, res) => {
                                             </div>
                                         </div>
                                     ` : ''}
-                                    
-                                    ${movie.subtitles ? `
-                                        <div style="grid-column: span 2;">
-                                            <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;">Subtitles</div>
-                                            <div style="font-weight: 600; display: flex; align-items: center; gap: 10px;">
-                                                <i class="fas fa-closed-captioning"></i>
-                                                <span>${movie.subtitles.split(',').slice(0, 3).join(', ')}${movie.subtitles.split(',').length > 3 ? '...' : ''}</span>
-                                            </div>
-                                        </div>
-                                    ` : ''}
                                 </div>
                             </div>
                         </div>
@@ -1992,11 +2419,11 @@ app.get('/', (req, res) => {
                         <div class="action-buttons">
                             <button class="action-btn stream-btn" id="play-single">
                                 <i class="fas fa-play-circle"></i>
-                                <span>Stream Now</span>
+                                <span>${isTV ? 'Play Episode' : 'Stream Now'}</span>
                             </button>
                             <button class="action-btn download-btn" id="download-single">
                                 <i class="fas fa-download"></i>
-                                <span>Download</span>
+                                <span>${isTV ? 'Download Episode' : 'Download'}</span>
                             </button>
                             ${movie.trailer ? `
                                 <button class="action-btn trailer-btn" id="play-trailer">
@@ -2034,11 +2461,12 @@ app.get('/', (req, res) => {
                             const seasonEpisodes = movie.episodes.filter(ep => ep.season == selectedSeason);
                             
                             episodeGrid.innerHTML = seasonEpisodes.map(ep => `
-                                <div>
+                                <div class="episode-item">
                                     <input type="checkbox" id="ep-${selectedSeason}-${ep.episode}" 
                                            class="episode-checkbox" 
                                            data-season="${selectedSeason}" 
-                                           data-episode="${ep.episode}">
+                                           data-episode="${ep.episode}"
+                                           value="s${selectedSeason}e${ep.episode}">
                                     <label for="ep-${selectedSeason}-${ep.episode}" class="episode-label">
                                         <div style="font-size: 1.2rem; margin-bottom: 0.5rem;">
                                             <i class="fas fa-play"></i>
@@ -2058,18 +2486,20 @@ app.get('/', (req, res) => {
                         });
                     });
                     
-                    // Setup select all button
+                    // Setup select all button - FIXED
                     const selectAllBtn = modalBody.querySelector('#select-all-btn');
                     selectAllBtn.addEventListener('click', () => {
                         const checkboxes = modalBody.querySelectorAll('.episode-checkbox');
-                        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+                        const allChecked = checkboxes.length > 0 && Array.from(checkboxes).every(cb => cb.checked);
                         
                         checkboxes.forEach(cb => {
                             cb.checked = !allChecked;
+                            const episodeKey = cb.value;
+                            
                             if (cb.checked) {
-                                selectedEpisodes.add(`s${cb.dataset.season}e${cb.dataset.episode}`);
+                                selectedEpisodes.add(episodeKey);
                             } else {
-                                selectedEpisodes.delete(`s${cb.dataset.season}e${cb.dataset.episode}`);
+                                selectedEpisodes.delete(episodeKey);
                             }
                         });
                         
@@ -2103,6 +2533,12 @@ app.get('/', (req, res) => {
                         const episode = Array.from(selectedEpisodes)[0];
                         const [season, ep] = episode.replace('s', '').replace('e', '').split('e');
                         await playStream(season, ep);
+                    } else if (isTV && selectedSeason) {
+                        // If no episode selected but season is selected, select first episode
+                        const firstEpisode = movie.episodes.find(ep => ep.season == selectedSeason);
+                        if (firstEpisode) {
+                            await playStream(selectedSeason, firstEpisode.episode);
+                        }
                     } else {
                         await playStream();
                     }
@@ -2114,6 +2550,12 @@ app.get('/', (req, res) => {
                         const episode = Array.from(selectedEpisodes)[0];
                         const [season, ep] = episode.replace('s', '').replace('e', '').split('e');
                         await downloadMovie(season, ep);
+                    } else if (isTV && selectedSeason) {
+                        // If no episode selected but season is selected, select first episode
+                        const firstEpisode = movie.episodes.find(ep => ep.season == selectedSeason);
+                        if (firstEpisode) {
+                            await downloadMovie(selectedSeason, firstEpisode.episode);
+                        }
                     } else {
                         await downloadMovie();
                     }
@@ -2148,12 +2590,12 @@ app.get('/', (req, res) => {
                 });
             }
 
-            // Setup episode selection
+            // Setup episode selection - FIXED
             function setupEpisodeSelection() {
                 const checkboxes = document.querySelectorAll('.episode-checkbox');
                 checkboxes.forEach(cb => {
                     cb.addEventListener('change', function() {
-                        const episodeKey = `s${this.dataset.season}e${this.dataset.episode}`;
+                        const episodeKey = this.value;
                         
                         if (this.checked) {
                             selectedEpisodes.add(episodeKey);
@@ -2166,22 +2608,24 @@ app.get('/', (req, res) => {
                 });
             }
 
-            // Update batch buttons
+            // Update batch buttons - FIXED
             function updateBatchButtons() {
                 const batchPlayBtn = document.querySelector('#batch-play-btn');
                 const batchDownloadBtn = document.querySelector('#batch-download-btn');
                 const count = selectedEpisodes.size;
                 
-                if (count > 0) {
-                    batchPlayBtn.disabled = false;
-                    batchDownloadBtn.disabled = false;
-                    batchPlayBtn.innerHTML = `<i class="fas fa-play-circle"></i> Play Selected (${count})`;
-                    batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download Selected (${count})`;
-                } else {
-                    batchPlayBtn.disabled = true;
-                    batchDownloadBtn.disabled = true;
-                    batchPlayBtn.innerHTML = `<i class="fas fa-play-circle"></i> Play Selected (0)`;
-                    batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download Selected (0)`;
+                if (batchPlayBtn && batchDownloadBtn) {
+                    if (count > 0) {
+                        batchPlayBtn.disabled = false;
+                        batchDownloadBtn.disabled = false;
+                        batchPlayBtn.innerHTML = `<i class="fas fa-play-circle"></i> Play Selected (${count})`;
+                        batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download (${count})`;
+                    } else {
+                        batchPlayBtn.disabled = true;
+                        batchDownloadBtn.disabled = true;
+                        batchPlayBtn.innerHTML = `<i class="fas fa-play-circle"></i> Play Selected`;
+                        batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download`;
+                    }
                 }
             }
 
@@ -2206,7 +2650,7 @@ app.get('/', (req, res) => {
                     videoContainer.scrollIntoView({ behavior: 'smooth' });
                 } catch (error) {
                     console.error('Stream error:', error);
-                    showModalError('Failed to start stream. Please try again.');
+                    showNotification('Failed to start stream. Please try again.', 'error');
                 }
             }
 
@@ -2255,14 +2699,14 @@ app.get('/', (req, res) => {
                             
                             showNotification('Download started!', 'success');
                         } else {
-                            showModalError('Download not available for this quality.');
+                            showNotification('Download not available for this quality.', 'error');
                         }
                     } else {
-                        showModalError('Download sources not available.');
+                        showNotification('Download sources not available.', 'error');
                     }
                 } catch (error) {
                     console.error('Download error:', error);
-                    showModalError('Download failed. Please try again.');
+                    showNotification('Download failed. Please try again.', 'error');
                 }
             }
 
@@ -2272,7 +2716,8 @@ app.get('/', (req, res) => {
                 
                 // For batch download, we'll download them one by one
                 const episodesArray = Array.from(selectedEpisodes);
-                let completed = 0;
+                
+                showNotification(`Starting download of ${episodesArray.length} episodes...`, 'info');
                 
                 for (const episode of episodesArray) {
                     const [season, ep] = episode.replace('s', '').replace('e', '').split('e');
@@ -2295,19 +2740,12 @@ app.get('/', (req, res) => {
                                 document.body.appendChild(link);
                                 link.click();
                                 document.body.removeChild(link);
-                                
-                                completed++;
-                                
-                                // Update notification
-                                showNotification(`Downloading ${completed}/${episodesArray.length}...`, 'info');
                             }
                         }
                     } catch (error) {
                         console.error(`Error downloading ${episode}:`, error);
                     }
                 }
-                
-                showNotification(`Downloaded ${completed} of ${episodesArray.length} episodes`, 'success');
             }
 
             // Update pagination
@@ -2370,7 +2808,7 @@ app.get('/', (req, res) => {
                     
                     if (data.success) {
                         currentContent = data.results;
-                        displayContent(data.results);
+                        displayContentGrid(data.results);
                         updatePagination(data.pagination);
                         
                         // Scroll to top
@@ -2380,6 +2818,16 @@ app.get('/', (req, res) => {
                     console.error('Page change error:', error);
                     showError('Failed to load page.');
                 }
+            }
+
+            // Load more featured
+            window.loadMoreFeatured = async function() {
+                await performSearch('2024');
+            }
+
+            // Load more trending
+            window.loadMoreTrending = async function() {
+                await performSearch('movie');
             }
 
             // Show skeleton loading
@@ -2516,6 +2964,12 @@ app.get('/', (req, res) => {
                 // Reset selections
                 selectedEpisodes.clear();
                 selectedSeason = null;
+                
+                // Clear interval
+                if (sliderInterval) {
+                    clearInterval(sliderInterval);
+                    sliderInterval = null;
+                }
             }
 
             // PWA Initialization
@@ -2580,11 +3034,11 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Service Worker (unchanged from previous version)
+// Service Worker
 app.get('/sw.js', (req, res) => {
     res.set('Content-Type', 'application/javascript');
     res.send(`
-        const CACHE_NAME = 'cloud-movies-v1';
+        const CACHE_NAME = 'cloud-movies-v2';
         
         const urlsToCache = [
             '/',
@@ -2653,7 +3107,7 @@ app.get('/sw.js', (req, res) => {
     `);
 });
 
-// Manifest (updated)
+// Manifest
 app.get('/manifest.json', (req, res) => {
     res.json({
         "name": "CLOUD.MOVIES | Premium Streaming",
@@ -2670,16 +3124,6 @@ app.get('/manifest.json', (req, res) => {
                 "sizes": "any",
                 "type": "image/svg+xml",
                 "purpose": "any maskable"
-            }
-        ],
-        "categories": ["entertainment", "movies", "video"],
-        "shortcuts": [
-            {
-                "name": "Search Content",
-                "short_name": "Search",
-                "description": "Search for movies and TV series",
-                "url": "/?search",
-                "icons": [{ "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' fill='%23667eea'>🔍</text></svg>", "sizes": "96x96" }]
             }
         ]
     });
