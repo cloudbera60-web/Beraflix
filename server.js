@@ -1,6 +1,6 @@
 /**
- * CLOUD.MOVIES - Complete Movie Streaming Platform
- * Works with Gifted Movies API - No URL pasting required
+ * CLOUD.MOVIES - Pure Gifted Movies API Implementation
+ * NO MOCKUPS, NO DEMOS, ONLY REAL API
  */
 
 const express = require('express');
@@ -25,24 +25,26 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Gifted Movies API Configuration
+// Gifted Movies API Configuration - ONLY THIS API
 const GIFTED_API_BASE = 'https://movieapi.giftedtech.co.ke';
-const DOWNLOAD_API_BASE = 'https://api.giftedtech.co.ke/api/download';
 
 // Cache for API responses
 const cache = new Map();
-const CACHE_DURATION = 300000; // 5 minutes
+const CACHE_DURATION = 300000;
 
 // User data storage
-let usersData = {};
+let userData = {
+    watchlist: [],
+    downloads: [],
+    history: []
+};
 
-// Fetch from Gifted Movies API
-async function fetchFromGiftedAPI(endpoint) {
-    const cacheKey = `gifted-${endpoint}`;
+// Fetch ONLY from Gifted Movies API
+async function fetchFromGiftedAPI(endpoint, params = {}) {
+    const cacheKey = `${endpoint}-${JSON.stringify(params)}`;
     const cached = cache.get(cacheKey);
     
     if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
-        console.log(`Cache hit for: ${endpoint}`);
         return cached.data;
     }
     
@@ -53,261 +55,119 @@ async function fetchFromGiftedAPI(endpoint) {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json'
             },
-            timeout: 15000
+            timeout: 15000,
+            params: params
         });
         
-        console.log(`API Response received for: ${endpoint}`);
+        console.log(`API Response for: ${endpoint} - Status: ${response.status}`);
         
+        const data = response.data;
         cache.set(cacheKey, {
-            data: response.data,
+            data: data,
             timestamp: Date.now()
         });
         
-        return response.data;
+        return data;
         
     } catch (error) {
         console.error(`Gifted API Error for ${endpoint}:`, error.message);
-        
-        // Return mock data for specific endpoints when API fails
-        if (endpoint.includes('/api/search/')) {
-            return getMockSearchResults(endpoint);
-        } else if (endpoint.includes('/api/info/')) {
-            return getMockMovieDetails();
-        } else if (endpoint.includes('/api/sources/')) {
-            return getMockSources();
+        if (error.response) {
+            console.error('Response status:', error.response.status);
+            console.error('Response data:', error.response.data);
         }
-        
         return { success: false, error: error.message };
     }
-}
-
-// Mock search results
-function getMockSearchResults(endpoint) {
-    const query = endpoint.split('/api/search/')[1] || '';
-    const decodedQuery = decodeURIComponent(query).toLowerCase();
-    
-    const mockMovies = [
-        {
-            id: 'tt0848228',
-            title: 'The Avengers',
-            year: '2012',
-            rating: '8.0',
-            image: 'https://image.tmdb.org/t/p/w500/RYMX2wcKCBAr24UyPD7xwmjaTn.jpg',
-            description: 'Earth\'s mightiest heroes must come together and learn to fight as a team.',
-            type: 'movie'
-        },
-        {
-            id: 'tt2395427',
-            title: 'Avengers: Age of Ultron',
-            year: '2015',
-            rating: '7.3',
-            image: 'https://image.tmdb.org/t/p/w500/4ssDuvEDkSArWEdyBl2X5EHvYKU.jpg',
-            description: 'When Tony Stark tries to jumpstart a dormant peacekeeping program.',
-            type: 'movie'
-        },
-        {
-            id: 'tt4154756',
-            title: 'Avengers: Infinity War',
-            year: '2018',
-            rating: '8.4',
-            image: 'https://image.tmdb.org/t/p/w500/7WsyChQLEftFiDOVTGkv3hFpyyt.jpg',
-            description: 'The Avengers and their allies must be willing to sacrifice all.',
-            type: 'movie'
-        },
-        {
-            id: 'tt4154796',
-            title: 'Avengers: Endgame',
-            year: '2019',
-            rating: '8.4',
-            image: 'https://image.tmdb.org/t/p/w500/or06FN3Dka5tukK1e9sl16pB3iy.jpg',
-            description: 'After the devastating events of Infinity War, the universe is in ruins.',
-            type: 'movie'
-        },
-        {
-            id: 'tt10872600',
-            title: 'Spider-Man: No Way Home',
-            year: '2021',
-            rating: '8.2',
-            image: 'https://image.tmdb.org/t/p/w500/1g0dhYtq4irTY1GPXvft6k4YLjm.jpg',
-            description: 'Peter Parker asks Doctor Strange for help, unleashing dangerous threats.',
-            type: 'movie'
-        },
-        {
-            id: 'tt1877830',
-            title: 'The Batman',
-            year: '2022',
-            rating: '7.8',
-            image: 'https://image.tmdb.org/t/p/w500/74xTEgt7R36Fpooo50r9T25onhq.jpg',
-            description: 'Batman uncovers corruption in Gotham City while facing the Riddler.',
-            type: 'movie'
-        },
-        {
-            id: 'tt1745960',
-            title: 'Top Gun: Maverick',
-            year: '2022',
-            rating: '8.3',
-            image: 'https://image.tmdb.org/t/p/w500/62HCnUTziyWcpDaBO2i1DX17ljH.jpg',
-            description: 'After thirty years, Maverick is still pushing the envelope.',
-            type: 'movie'
-        },
-        {
-            id: 'tt10366206',
-            title: 'John Wick: Chapter 4',
-            year: '2023',
-            rating: '8.0',
-            image: 'https://image.tmdb.org/t/p/w500/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg',
-            description: 'John Wick uncovers a path to defeating The High Table.',
-            type: 'movie'
-        }
-    ];
-    
-    const filteredMovies = mockMovies.filter(movie => 
-        movie.title.toLowerCase().includes(decodedQuery) ||
-        decodedQuery.includes('avengers') ||
-        decodedQuery.includes('spider') ||
-        decodedQuery.includes('batman')
-    );
-    
-    return { success: true, data: filteredMovies };
-}
-
-// Mock movie details
-function getMockMovieDetails() {
-    return {
-        success: true,
-        data: {
-            id: 'tt4154796',
-            title: 'Avengers: Endgame',
-            description: 'After the devastating events of Avengers: Infinity War, the universe is in ruins. With the help of remaining allies, the Avengers assemble once more in order to reverse Thanos actions and restore balance to the universe.',
-            releaseDate: '2019-04-24',
-            rating: '8.4',
-            duration: '181 min',
-            genre: ['Action', 'Adventure', 'Drama'],
-            cast: ['Robert Downey Jr.', 'Chris Evans', 'Mark Ruffalo', 'Chris Hemsworth', 'Scarlett Johansson'],
-            director: 'Anthony Russo, Joe Russo',
-            image: 'https://image.tmdb.org/t/p/original/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg',
-            poster: 'https://image.tmdb.org/t/p/w500/or06FN3Dka5tukK1e9sl16pB3iy.jpg',
-            type: 'movie',
-            country: 'United States',
-            production: 'Marvel Studios'
-        }
-    };
-}
-
-// Mock sources
-function getMockSources() {
-    return {
-        success: true,
-        data: {
-            sources: [
-                {
-                    quality: '360p',
-                    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-                    type: 'mp4'
-                },
-                {
-                    quality: '480p',
-                    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-                    type: 'mp4'
-                },
-                {
-                    quality: '720p',
-                    url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-                    type: 'mp4'
-                }
-            ]
-        }
-    };
 }
 
 // Get trending movies
 async function getTrendingMovies() {
     try {
-        // Try to get from API first
-        const apiData = await fetchFromGiftedAPI('/api/search/2023');
-        if (apiData && apiData.success && apiData.data && apiData.data.length > 0) {
-            console.log('Using API data for trending');
-            return apiData.data.slice(0, 8);
+        const data = await fetchFromGiftedAPI('/api/search/trending');
+        if (data && data.success && data.data) {
+            console.log(`Got ${data.data.length} trending movies from API`);
+            return data.data;
         }
     } catch (error) {
-        console.log('API failed, using mock data for trending');
+        console.error('Error getting trending movies:', error);
     }
-    
-    // Return mock trending movies
-    return [
-        {
-            id: 'tt4154796',
-            title: 'Avengers: Endgame',
-            year: '2019',
-            rating: '8.4',
-            image: 'https://image.tmdb.org/t/p/w500/or06FN3Dka5tukK1e9sl16pB3iy.jpg',
-            description: 'After the devastating events of Infinity War.',
-            type: 'movie'
-        },
-        {
-            id: 'tt10872600',
-            title: 'Spider-Man: No Way Home',
-            year: '2021',
-            rating: '8.2',
-            image: 'https://image.tmdb.org/t/p/w500/1g0dhYtq4irTY1GPXvft6k4YLjm.jpg',
-            description: 'Peter Parker asks Doctor Strange for help.',
-            type: 'movie'
-        },
-        {
-            id: 'tt1877830',
-            title: 'The Batman',
-            year: '2022',
-            rating: '7.8',
-            image: 'https://image.tmdb.org/t/p/w500/74xTEgt7R36Fpooo50r9T25onhq.jpg',
-            description: 'Batman uncovers corruption in Gotham City.',
-            type: 'movie'
-        },
-        {
-            id: 'tt1745960',
-            title: 'Top Gun: Maverick',
-            year: '2022',
-            rating: '8.3',
-            image: 'https://image.tmdb.org/t/p/w500/62HCnUTziyWcpDaBO2i1DX17ljH.jpg',
-            description: 'After thirty years, Maverick is still pushing.',
-            type: 'movie'
-        },
-        {
-            id: 'tt10366206',
-            title: 'John Wick: Chapter 4',
-            year: '2023',
-            rating: '8.0',
-            image: 'https://image.tmdb.org/t/p/w500/vZloFAK7NmvMGKE7VkF5UHaz0I.jpg',
-            description: 'John Wick uncovers a path to defeating.',
-            type: 'movie'
-        },
-        {
-            id: 'tt6710474',
-            title: 'Everything Everywhere All at Once',
-            year: '2022',
-            rating: '7.8',
-            image: 'https://image.tmdb.org/t/p/w500/w3LxiVYdWWRvEVdn5RYq6jIqkb1.jpg',
-            description: 'An aging Chinese immigrant is swept up.',
-            type: 'movie'
-        },
-        {
-            id: 'tt9114286',
-            title: 'Black Panther: Wakanda Forever',
-            year: '2022',
-            rating: '7.2',
-            image: 'https://image.tmdb.org/t/p/w500/sv1xJUazXeYqALzczSZ3O6nkH75.jpg',
-            description: 'Queen Ramonda, Shuri, M\'Baku and allies.',
-            type: 'movie'
-        },
-        {
-            id: 'tt15398776',
-            title: 'Oppenheimer',
-            year: '2023',
-            rating: '8.3',
-            image: 'https://image.tmdb.org/t/p/w500/8Gxv8gSFCU0XGDykEGv7zR1n8ua.jpg',
-            description: 'The story of American scientist J. Robert Oppenheimer.',
-            type: 'movie'
+    return [];
+}
+
+// Get popular movies
+async function getPopularMovies() {
+    try {
+        const data = await fetchFromGiftedAPI('/api/search/popular');
+        if (data && data.success && data.data) {
+            console.log(`Got ${data.data.length} popular movies from API`);
+            return data.data;
         }
-    ];
+    } catch (error) {
+        console.error('Error getting popular movies:', error);
+    }
+    return [];
+}
+
+// Get latest movies
+async function getLatestMovies() {
+    try {
+        const data = await fetchFromGiftedAPI('/api/search/latest');
+        if (data && data.success && data.data) {
+            console.log(`Got ${data.data.length} latest movies from API`);
+            return data.data;
+        }
+    } catch (error) {
+        console.error('Error getting latest movies:', error);
+    }
+    return [];
+}
+
+// Search movies
+async function searchMovies(query) {
+    try {
+        const data = await fetchFromGiftedAPI(`/api/search/${encodeURIComponent(query)}`);
+        if (data && data.success && data.data) {
+            console.log(`Got ${data.data.length} search results for "${query}"`);
+            return data.data;
+        }
+    } catch (error) {
+        console.error('Error searching movies:', error);
+    }
+    return [];
+}
+
+// Get movie details
+async function getMovieDetails(movieId) {
+    try {
+        const data = await fetchFromGiftedAPI(`/api/info/${movieId}`);
+        if (data && data.success && data.data) {
+            console.log(`Got movie details for ID: ${movieId}`);
+            return data.data;
+        }
+    } catch (error) {
+        console.error('Error getting movie details:', error);
+    }
+    return null;
+}
+
+// Get movie sources
+async function getMovieSources(movieId, season = null, episode = null) {
+    try {
+        let endpoint = `/api/sources/${movieId}`;
+        const params = {};
+        if (season && episode) {
+            params.season = season;
+            params.episode = episode;
+        }
+        
+        const data = await fetchFromGiftedAPI(endpoint, params);
+        if (data && data.success && data.data) {
+            console.log(`Got sources for movie ID: ${movieId}`);
+            return data.data;
+        }
+    } catch (error) {
+        console.error('Error getting movie sources:', error);
+    }
+    return null;
 }
 
 // Generate HTML for the frontend
@@ -319,7 +179,7 @@ function generateFrontend() {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CLOUD.MOVIES - Stream Movies & TV Shows</title>
-    <meta name="description" content="Stream unlimited movies and TV shows. Watch in HD, download offline.">
+    <meta name="description" content="Stream unlimited movies and TV shows. Powered by Gifted Movies API.">
     <meta name="theme-color" content="#121212">
     
     <!-- PWA -->
@@ -636,8 +496,7 @@ function generateFrontend() {
             left: 0;
             width: 100%;
             height: 100%;
-            background: linear-gradient(90deg, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.4) 50%, rgba(0,0,0,0.8) 100%),
-                        url('https://image.tmdb.org/t/p/original/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg');
+            background: linear-gradient(90deg, rgba(0,0,0,0.8) 0%, rgba(0,0,0,0.4) 50%, rgba(0,0,0,0.8) 100%);
             background-size: cover;
             background-position: center;
         }
@@ -1187,6 +1046,40 @@ function generateFrontend() {
         .text-muted {
             color: var(--gray);
         }
+
+        /* Error States */
+        .error-state {
+            text-align: center;
+            padding: 60px 20px;
+            background: var(--dark-card-hover);
+            border-radius: var(--radius);
+            margin: 20px 0;
+        }
+
+        .error-state i {
+            font-size: 3rem;
+            color: var(--danger);
+            margin-bottom: 20px;
+        }
+
+        .error-state h3 {
+            color: var(--danger);
+            margin-bottom: 15px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            background: var(--dark-card-hover);
+            border-radius: var(--radius);
+            margin: 20px 0;
+        }
+
+        .empty-state i {
+            font-size: 3rem;
+            color: var(--gray);
+            margin-bottom: 20px;
+        }
     </style>
 </head>
 <body>
@@ -1229,10 +1122,6 @@ function generateFrontend() {
                 <button class="action-btn" id="themeToggle">
                     <i class="fas fa-moon"></i>
                 </button>
-                <button class="action-btn" id="notificationsBtn">
-                    <i class="fas fa-bell"></i>
-                    <span class="badge" id="notificationsBadge">0</span>
-                </button>
                 <button class="action-btn" id="userBtn">
                     <i class="fas fa-user"></i>
                 </button>
@@ -1247,58 +1136,18 @@ function generateFrontend() {
             <div class="hero">
                 <div class="hero-background"></div>
                 <div class="hero-content">
-                    <h1>Unlimited Movies & TV Shows</h1>
-                    <p>Stream thousands of movies and TV shows in HD. No subscription required. Watch anywhere, anytime.</p>
+                    <h1>Stream Unlimited Movies</h1>
+                    <p>Powered by Gifted Movies API. Search, stream, and download movies directly from the API.</p>
                     <div class="hero-buttons">
-                        <button class="btn btn-primary btn-lg" onclick="loadTrendingMovies()">
-                            <i class="fas fa-play"></i> Start Streaming
-                        </button>
-                        <button class="btn btn-secondary btn-lg" onclick="showPopularMovies()">
-                            <i class="fas fa-fire"></i> Trending Now
+                        <button class="btn btn-primary btn-lg" onclick="loadMovies()">
+                            <i class="fas fa-search"></i> Search Movies
                         </button>
                     </div>
                 </div>
             </div>
 
-            <!-- Movie Sections -->
-            <div id="trendingSection">
-                <div class="section-header">
-                    <h2><i class="fas fa-fire"></i> Trending Now</h2>
-                    <a href="#" class="view-all" onclick="showAllTrending()">View All <i class="fas fa-arrow-right"></i></a>
-                </div>
-                <div class="movies-grid" id="trendingMovies">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading trending movies from Gifted Movies API...</p>
-                    </div>
-                </div>
-            </div>
-
-            <div id="popularSection">
-                <div class="section-header">
-                    <h2><i class="fas fa-star"></i> Popular Movies</h2>
-                    <a href="#" class="view-all" onclick="showAllPopular()">View All <i class="fas fa-arrow-right"></i></a>
-                </div>
-                <div class="movies-grid" id="popularMovies">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading popular movies...</p>
-                    </div>
-                </div>
-            </div>
-
-            <div id="actionSection">
-                <div class="section-header">
-                    <h2><i class="fas fa-explosion"></i> Action Movies</h2>
-                    <a href="#" class="view-all" onclick="searchActionMovies()">View All <i class="fas fa-arrow-right"></i></a>
-                </div>
-                <div class="movies-grid" id="actionMovies">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading action movies...</p>
-                    </div>
-                </div>
-            </div>
+            <!-- Movie Sections will be loaded here -->
+            <div id="moviesContainer"></div>
         </div>
     </main>
 
@@ -1307,29 +1156,26 @@ function generateFrontend() {
         <div class="footer-content">
             <div class="footer-section">
                 <h3>CLOUD.MOVIES</h3>
-                <p>Premium streaming platform by Bera Tech. Powered by Gifted Movies API.</p>
+                <p>Streaming platform powered by Gifted Movies API. No mockups, no demos, only real API data.</p>
             </div>
             <div class="footer-section">
-                <h3>Quick Links</h3>
+                <h3>API Status</h3>
                 <ul class="footer-links">
-                    <li><a href="#" onclick="loadTrendingMovies()">Home</a></li>
-                    <li><a href="#" onclick="showAllMovies()">All Movies</a></li>
-                    <li><a href="#" onclick="loadWatchlist()">My Watchlist</a></li>
-                    <li><a href="#" onclick="loadDownloads()">Downloads</a></li>
+                    <li><a href="#" onclick="testAPI()">Test API Connection</a></li>
+                    <li><a href="#" onclick="showAPIDocs()">API Documentation</a></li>
                 </ul>
             </div>
             <div class="footer-section">
-                <h3>Support</h3>
+                <h3>Powered By</h3>
                 <ul class="footer-links">
-                    <li><a href="#" onclick="showToast('Contact support@cloudmovies.bera.tech', 'info')">Contact</a></li>
-                    <li><a href="#" onclick="showToast('API: Gifted Movies API', 'info')">API Status</a></li>
-                    <li><a href="#" onclick="showToast('© 2024 Bera Tech', 'info')">Terms</a></li>
-                    <li><a href="#" onclick="showToast('Your privacy is important', 'info')">Privacy</a></li>
+                    <li>Gifted Movies API</li>
+                    <li>Bera Tech</li>
+                    <li>Cloud Infrastructure</li>
                 </ul>
             </div>
         </div>
         <div class="copyright">
-            © 2024 Bera Tech - CLOUD.MOVIES. Streaming via Gifted Movies API.
+            © 2024 Bera Tech - CLOUD.MOVIES. Only real API data from Gifted Movies API.
         </div>
     </footer>
 
@@ -1360,9 +1206,8 @@ function generateFrontend() {
         const searchInput = document.getElementById('searchInput');
         const searchResults = document.getElementById('searchResults');
         const content = document.getElementById('content');
+        const moviesContainer = document.getElementById('moviesContainer');
         const userBtn = document.getElementById('userBtn');
-        const notificationsBtn = document.getElementById('notificationsBtn');
-        const notificationsBadge = document.getElementById('notificationsBadge');
 
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
@@ -1379,7 +1224,6 @@ function generateFrontend() {
 
             // Event Listeners
             setupEventListeners();
-            updateBadges();
         });
 
         // Age Verification
@@ -1422,68 +1266,63 @@ function generateFrontend() {
 
         // Initialize App
         async function initializeApp() {
-            // Load movie sections
-            await loadMovieSections();
+            // Load initial movies
+            await loadInitialMovies();
             
             // Setup search
             setupSearch();
         }
 
-        // Load Movie Sections
-        async function loadMovieSections() {
+        // Load Initial Movies
+        async function loadInitialMovies() {
             showLoading();
             
             try {
-                // Load trending movies
-                const trendingResponse = await fetch('/api/trending');
-                const trendingData = await trendingResponse.json();
+                // Try to fetch from API
+                const response = await fetch('/api/trending');
+                const data = await response.json();
                 
-                if (trendingData.success && trendingData.data) {
-                    displayMovies('trendingMovies', trendingData.data.slice(0, 8));
+                if (data.success && data.data && data.data.length > 0) {
+                    displayMovies(data.data);
                 } else {
-                    // Try default search
-                    const searchResponse = await fetch('/api/search/avengers');
-                    const searchData = await searchResponse.json();
-                    if (searchData.success && searchData.data) {
-                        displayMovies('trendingMovies', searchData.data.slice(0, 8));
-                    }
+                    showAPIError();
                 }
-
-                // Load popular movies (search for popular movies)
-                const popularResponse = await fetch('/api/search/movie');
-                const popularData = await popularResponse.json();
-                
-                if (popularData.success && popularData.data) {
-                    displayMovies('popularMovies', popularData.data.slice(0, 8));
-                }
-
-                // Load action movies
-                const actionResponse = await fetch('/api/search/action');
-                const actionData = await actionResponse.json();
-                
-                if (actionData.success && actionData.data) {
-                    displayMovies('actionMovies', actionData.data.slice(0, 8));
-                }
-                
             } catch (error) {
                 console.error('Error loading movies:', error);
-                showToast('Using demo content. Real API might be unavailable.', 'info');
-                // Show mock data
-                displayMockMovies();
+                showAPIError();
             } finally {
                 hideLoading();
             }
         }
 
-        function displayMovies(containerId, movies) {
-            const container = document.getElementById(containerId);
-            if (!container) return;
+        function displayMovies(movies) {
+            if (!movies || movies.length === 0) {
+                moviesContainer.innerHTML = \`
+                    <div class="empty-state">
+                        <i class="fas fa-film"></i>
+                        <h3>No Movies Found</h3>
+                        <p>No movies available from the API at this time.</p>
+                        <button class="btn btn-primary mt-4" onclick="loadMovies()">
+                            <i class="fas fa-sync"></i> Try Again
+                        </button>
+                    </div>
+                \`;
+                return;
+            }
 
-            container.innerHTML = '';
+            moviesContainer.innerHTML = \`
+                <div class="section-header">
+                    <h2><i class="fas fa-fire"></i> Movies from API</h2>
+                    <span class="text-muted">\${movies.length} movies</span>
+                </div>
+                <div class="movies-grid" id="moviesGrid"></div>
+            \`;
+
+            const moviesGrid = document.getElementById('moviesGrid');
             
             movies.forEach(movie => {
                 const card = createMovieCard(movie);
-                container.appendChild(card);
+                moviesGrid.appendChild(card);
             });
         }
 
@@ -1492,21 +1331,24 @@ function generateFrontend() {
             card.className = 'movie-card';
             card.dataset.id = movie.id;
             
+            const imageUrl = movie.image || movie.poster || 
+                (movie.images && movie.images.length > 0 ? movie.images[0] : '');
+            
             card.innerHTML = \`
-                <img src="\${movie.image || 'https://via.placeholder.com/200x300/1a1a1a/ffffff?text=Movie'}" 
-                     alt="\${movie.title}"
-                     onerror="this.src='https://via.placeholder.com/200x300/1a1a1a/ffffff?text=Movie'">
+                <img src="\${imageUrl || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300" viewBox="0 0 200 300"><rect width="200" height="300" fill="%23121212"/><text x="50%" y="50%" fill="%236c757d" font-family="Arial" font-size="14" text-anchor="middle" dy=".3em">No Image</text></svg>'}" 
+                     alt="\${movie.title || 'Movie'}"
+                     onerror="this.src='data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"300\" viewBox=\"0 0 200 300\"><rect width=\"200\" height=\"300\" fill=\"%23121212\"/><text x=\"50%\" y=\"50%\" fill=\"%236c757d\" font-family=\"Arial\" font-size=\"14\" text-anchor=\"middle\" dy=\".3em\">No Image</text></svg>'">
                 <div class="movie-actions">
-                    <button class="action-btn" onclick="event.stopPropagation(); addToWatchlist('\${movie.id}', '\${movie.title}', '\${movie.image}')">
+                    <button class="action-btn" onclick="event.stopPropagation(); addToWatchlist('\${movie.id}', '\${movie.title}', '\${imageUrl}')">
                         <i class="fas fa-bookmark"></i>
                     </button>
                 </div>
                 <div class="movie-info">
                     <div class="movie-title">\${movie.title || 'Untitled Movie'}</div>
                     <div class="movie-meta">
-                        <span>\${movie.year || '2023'}</span>
+                        <span>\${movie.year || movie.releaseDate || 'N/A'}</span>
                         <span class="rating">
-                            <i class="fas fa-star"></i> \${movie.rating || '8.0'}
+                            <i class="fas fa-star"></i> \${movie.rating || movie.vote_average || 'N/A'}
                         </span>
                     </div>
                 </div>
@@ -1516,41 +1358,22 @@ function generateFrontend() {
             return card;
         }
 
-        function displayMockMovies() {
-            const mockMovies = [
-                {
-                    id: 'tt4154796',
-                    title: 'Avengers: Endgame',
-                    year: '2019',
-                    rating: '8.4',
-                    image: 'https://image.tmdb.org/t/p/w500/or06FN3Dka5tukK1e9sl16pB3iy.jpg'
-                },
-                {
-                    id: 'tt10872600',
-                    title: 'Spider-Man: No Way Home',
-                    year: '2021',
-                    rating: '8.2',
-                    image: 'https://image.tmdb.org/t/p/w500/1g0dhYtq4irTY1GPXvft6k4YLjm.jpg'
-                },
-                {
-                    id: 'tt1877830',
-                    title: 'The Batman',
-                    year: '2022',
-                    rating: '7.8',
-                    image: 'https://image.tmdb.org/t/p/w500/74xTEgt7R36Fpooo50r9T25onhq.jpg'
-                },
-                {
-                    id: 'tt1745960',
-                    title: 'Top Gun: Maverick',
-                    year: '2022',
-                    rating: '8.3',
-                    image: 'https://image.tmdb.org/t/p/w500/62HCnUTziyWcpDaBO2i1DX17ljH.jpg'
-                }
-            ];
-            
-            displayMovies('trendingMovies', mockMovies);
-            displayMovies('popularMovies', mockMovies);
-            displayMovies('actionMovies', mockMovies);
+        function showAPIError() {
+            moviesContainer.innerHTML = \`
+                <div class="error-state">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <h3>API Connection Error</h3>
+                    <p>Unable to connect to Gifted Movies API. Please try again later.</p>
+                    <div class="mt-4">
+                        <button class="btn btn-primary" onclick="loadInitialMovies()">
+                            <i class="fas fa-sync"></i> Retry
+                        </button>
+                        <button class="btn btn-secondary" onclick="testAPI()">
+                            <i class="fas fa-wrench"></i> Test API
+                        </button>
+                    </div>
+                </div>
+            \`;
         }
 
         // Search Functionality
@@ -1579,7 +1402,7 @@ function generateFrontend() {
                         }
                     } catch (error) {
                         console.error('Search error:', error);
-                        searchResults.innerHTML = '<div class="search-result-item">Search temporarily unavailable</div>';
+                        searchResults.innerHTML = '<div class="search-result-item">Search failed</div>';
                         searchResults.style.display = 'block';
                     }
                 }, 500);
@@ -1599,13 +1422,17 @@ function generateFrontend() {
             results.slice(0, 6).forEach(movie => {
                 const item = document.createElement('div');
                 item.className = 'search-result-item';
+                
+                const imageUrl = movie.image || movie.poster || 
+                    (movie.images && movie.images.length > 0 ? movie.images[0] : '');
+                
                 item.innerHTML = \`
-                    <img src="\${movie.image || 'https://via.placeholder.com/60x90/1a1a1a/ffffff?text=Movie'}" 
+                    <img src="\${imageUrl || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="60" height="90" viewBox="0 0 60 90"><rect width="60" height="90" fill="%23121212"/><text x="50%" y="50%" fill="%236c757d" font-family="Arial" font-size="10" text-anchor="middle" dy=".3em">No Image</text></svg>'}" 
                          alt="\${movie.title}"
-                         onerror="this.src='https://via.placeholder.com/60x90/1a1a1a/ffffff?text=Movie'">
+                         onerror="this.src='data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"60\" height=\"90\" viewBox=\"0 0 60 90\"><rect width=\"60\" height=\"90\" fill=\"%23121212\"/><text x=\"50%\" y=\"50%\" fill=\"%236c757d\" font-family=\"Arial\" font-size=\"10\" text-anchor=\"middle\" dy=\".3em\">No Image</text></svg>'">
                     <div class="search-result-info">
                         <h4>\${movie.title || 'Untitled'}</h4>
-                        <p>\${movie.year || '2023'} • \${movie.type || 'movie'}</p>
+                        <p>\${movie.year || 'N/A'} • \${movie.type || 'movie'}</p>
                     </div>
                 \`;
                 
@@ -1632,70 +1459,65 @@ function generateFrontend() {
                 
                 if (data.success && data.data) {
                     displayMovieDetails(data.data);
-                    addToHistory(movieId, data.data.title);
                 } else {
                     throw new Error('No movie details found');
                 }
             } catch (error) {
                 console.error('Error loading movie details:', error);
-                displayMovieDetails(getMockMovieDetails());
-                showToast('Showing demo content', 'info');
+                showToast('Failed to load movie details from API', 'error');
+                goBack();
             } finally {
                 hideLoading();
             }
-        }
-
-        function getMockMovieDetails() {
-            return {
-                id: 'tt4154796',
-                title: 'Avengers: Endgame',
-                description: 'After the devastating events of Avengers: Infinity War, the universe is in ruins. With the help of remaining allies, the Avengers assemble once more in order to reverse Thanos actions and restore balance to the universe.',
-                releaseDate: '2019-04-24',
-                rating: '8.4',
-                duration: '181 min',
-                genre: ['Action', 'Adventure', 'Drama'],
-                cast: ['Robert Downey Jr.', 'Chris Evans', 'Mark Ruffalo', 'Chris Hemsworth', 'Scarlett Johansson'],
-                director: 'Anthony Russo, Joe Russo',
-                image: 'https://image.tmdb.org/t/p/original/7RyHsO4yDXtBv1zUU3mTpHeQ0d5.jpg',
-                poster: 'https://image.tmdb.org/t/p/w500/or06FN3Dka5tukK1e9sl16pB3iy.jpg',
-                type: 'movie',
-                country: 'United States',
-                production: 'Marvel Studios'
-            };
         }
 
         function displayMovieDetails(movie) {
             content.innerHTML = \`
                 <div class="movie-details">
                     <div class="details-poster">
-                        <img src="\${movie.poster || movie.image}" 
+                        <img src="\${movie.poster || movie.image || movie.cover || 'data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"450\" viewBox=\"0 0 300 450\"><rect width=\"300\" height=\"450\" fill=\"%23121212\"/><text x=\"50%\" y=\"50%\" fill=\"%236c757d\" font-family=\"Arial\" font-size=\"16\" text-anchor=\"middle\" dy=\".3em\">No Poster</text></svg>'}" 
                              alt="\${movie.title}"
-                             onerror="this.src='https://via.placeholder.com/300x450/1a1a1a/ffffff?text=Poster'">
+                             onerror="this.src='data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"450\" viewBox=\"0 0 300 450\"><rect width=\"300\" height=\"450\" fill=\"%23121212\"/><text x=\"50%\" y=\"50%\" fill=\"%236c757d\" font-family=\"Arial\" font-size=\"16\" text-anchor=\"middle\" dy=\".3em\">No Poster</text></svg>'">
                     </div>
                     <div class="details-info">
-                        <h1>\${movie.title}</h1>
+                        <h1>\${movie.title || 'Untitled Movie'}</h1>
                         <div class="details-meta">
-                            <span><i class="fas fa-star" style="color: var(--warning);"></i> \${movie.rating}/10</span>
-                            <span><i class="fas fa-calendar"></i> \${movie.releaseDate}</span>
-                            <span><i class="fas fa-clock"></i> \${movie.duration}</span>
-                            <span><i class="fas fa-film"></i> Movie</span>
+                            \${movie.rating ? \`<span><i class="fas fa-star" style="color: var(--warning);"></i> \${movie.rating}/10</span>\` : ''}
+                            \${movie.releaseDate ? \`<span><i class="fas fa-calendar"></i> \${movie.releaseDate}</span>\` : ''}
+                            \${movie.duration ? \`<span><i class="fas fa-clock"></i> \${movie.duration}</span>\` : ''}
+                            <span><i class="fas fa-film"></i> \${movie.type || 'Movie'}</span>
                         </div>
                         
                         <div class="details-overview">
                             <h3 style="margin-bottom: 10px; color: var(--primary);">Overview</h3>
-                            <p>\${movie.description}</p>
+                            <p>\${movie.description || movie.overview || 'No description available from API.'}</p>
                         </div>
                         
-                        <div style="margin-bottom: 20px;">
-                            <h3 style="margin-bottom: 10px; color: var(--primary);">Genre</h3>
-                            <div class="flex gap-2" style="flex-wrap: wrap;">
-                                \${movie.genre.map(g => \`
-                                    <span style="background: rgba(0, 180, 216, 0.2); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem;">
-                                        \${g}
-                                    </span>
-                                \`).join('')}
+                        \${movie.genre && movie.genre.length > 0 ? \`
+                            <div style="margin-bottom: 20px;">
+                                <h3 style="margin-bottom: 10px; color: var(--primary);">Genre</h3>
+                                <div class="flex gap-2" style="flex-wrap: wrap;">
+                                    \${movie.genre.map(g => \`
+                                        <span style="background: rgba(0, 180, 216, 0.2); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem;">
+                                            \${g}
+                                        </span>
+                                    \`).join('')}
+                                </div>
                             </div>
-                        </div>
+                        \` : ''}
+                        
+                        \${movie.cast && movie.cast.length > 0 ? \`
+                            <div style="margin-bottom: 20px;">
+                                <h3 style="margin-bottom: 10px; color: var(--primary);">Cast</h3>
+                                <div class="flex gap-2" style="flex-wrap: wrap;">
+                                    \${movie.cast.slice(0, 5).map(actor => \`
+                                        <span style="background: rgba(255, 255, 255, 0.1); padding: 5px 12px; border-radius: 20px; font-size: 0.9rem;">
+                                            \${actor}
+                                        </span>
+                                    \`).join('')}
+                                </div>
+                            </div>
+                        \` : ''}
                         
                         <div class="details-actions">
                             <button class="btn btn-primary" onclick="startStreaming('\${movie.id}')">
@@ -1711,14 +1533,14 @@ function generateFrontend() {
                         
                         <div style="margin-top: 30px; padding: 15px; background: rgba(0, 180, 216, 0.1); border-radius: var(--radius);">
                             <p style="font-size: 0.9rem; color: var(--gray);">
-                                <i class="fas fa-info-circle"></i> Streaming via Gifted Movies API. Quality may vary.
+                                <i class="fas fa-info-circle"></i> Streaming directly from Gifted Movies API.
                             </p>
                         </div>
                     </div>
                 </div>
                 <div class="mt-4">
                     <button class="btn btn-secondary" onclick="goBack()">
-                        <i class="fas fa-arrow-left"></i> Back to Home
+                        <i class="fas fa-arrow-left"></i> Back to Movies
                     </button>
                 </div>
             \`;
@@ -1730,34 +1552,43 @@ function generateFrontend() {
             showLoading();
             
             try {
-                const response = await fetch(\`/api/stream/\${movieId}?quality=\${currentQuality}\`);
-                const data = await response.json();
+                // First get sources
+                const sourcesResponse = await fetch(\`/api/sources/\${movieId}\`);
+                const sourcesData = await sourcesResponse.json();
                 
-                if (data.success && data.url) {
-                    displayVideoPlayer(data.url, currentQuality);
-                    addToHistory(movieId, \`Streamed (\${currentQuality})\`);
-                    showToast(\`Streaming started in \${currentQuality}\`, 'success');
+                if (sourcesData.success && sourcesData.data && sourcesData.data.sources) {
+                    const sources = sourcesData.data.sources;
+                    
+                    // Check if we have video sources
+                    const videoSources = sources.filter(source => 
+                        source.url && (source.type === 'mp4' || source.url.includes('.mp4') || source.url.includes('.m3u8'))
+                    );
+                    
+                    if (videoSources.length > 0) {
+                        // Use the first video source
+                        const videoSource = videoSources[0];
+                        displayVideoPlayer(videoSource.url, videoSource.quality || 'HD');
+                        showToast('Streaming from API', 'success');
+                    } else {
+                        // Try to find any URL that might be a video
+                        const firstSource = sources[0];
+                        if (firstSource && firstSource.url) {
+                            displayVideoPlayer(firstSource.url, 'Unknown');
+                            showToast('Streaming from API (unknown quality)', 'info');
+                        } else {
+                            throw new Error('No streaming sources available');
+                        }
+                    }
                 } else {
-                    throw new Error('No stream available');
+                    throw new Error('No streaming sources available');
                 }
             } catch (error) {
                 console.error('Streaming error:', error);
-                // Use fallback video
-                const videoUrl = getFallbackVideoUrl(currentQuality);
-                displayVideoPlayer(videoUrl, currentQuality);
-                showToast('Streaming sample video', 'info');
+                showToast('No streaming available from API', 'error');
+                goBackToDetails();
             } finally {
                 hideLoading();
             }
-        }
-
-        function getFallbackVideoUrl(quality) {
-            const videos = {
-                '360p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-                '480p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-                '720p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4'
-            };
-            return videos[quality] || videos['360p'];
         }
 
         function displayVideoPlayer(videoUrl, quality) {
@@ -1766,15 +1597,16 @@ function generateFrontend() {
                     <video id="videoPlayer" class="video-js vjs-big-play-centered" controls autoplay preload="auto">
                         <source src="\${videoUrl}" type="video/mp4">
                         <p class="vjs-no-js">
-                            To view this video please enable JavaScript
+                            Your browser does not support HTML5 video.
                         </p>
                     </video>
                 </div>
                 <div class="player-controls">
-                    <div class="quality-selector">
-                        <button class="quality-btn \${quality === '360p' ? 'active' : ''}" onclick="changeQuality('360p')">360p</button>
-                        <button class="quality-btn \${quality === '480p' ? 'active' : ''}" onclick="changeQuality('480p')">480p</button>
-                        <button class="quality-btn \${quality === '720p' ? 'active' : ''}" onclick="changeQuality('720p')">720p</button>
+                    <div>
+                        <span style="color: var(--primary); font-weight: 500;">
+                            <i class="fas fa-satellite-dish"></i> Streaming from API
+                        </span>
+                        \${quality ? \`<span style="margin-left: 15px; color: var(--gray);">Quality: \${quality}</span>\` : ''}
                     </div>
                     <div>
                         <button class="btn btn-primary" onclick="downloadCurrentVideo()">
@@ -1787,38 +1619,30 @@ function generateFrontend() {
                 </div>
                 <div class="mt-4" style="padding: 15px; background: rgba(0, 180, 216, 0.1); border-radius: var(--radius);">
                     <p style="font-size: 0.9rem; color: var(--gray);">
-                        <i class="fas fa-info-circle"></i> Streaming via Gifted Movies API
+                        <i class="fas fa-info-circle"></i> Streaming directly from Gifted Movies API source.
                     </p>
                 </div>
             \`;
             
             // Initialize Video.js player
-            const player = videojs('videoPlayer', {
-                controls: true,
-                autoplay: true,
-                preload: 'auto',
-                fluid: true,
-                responsive: true
-            });
-            
-            window.videoPlayer = player;
-        }
-
-        function changeQuality(quality) {
-            currentQuality = quality;
-            document.querySelectorAll('.quality-btn').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            event.target.classList.add('active');
-            
-            if (currentMovieId) {
-                startStreaming(currentMovieId);
-            }
-        }
-
-        function downloadCurrentVideo() {
-            if (currentMovieId) {
-                downloadMovie(currentMovieId, \`Movie_Quality_\${currentQuality}\`);
+            try {
+                const player = videojs('videoPlayer', {
+                    controls: true,
+                    autoplay: true,
+                    preload: 'auto',
+                    fluid: true,
+                    responsive: true
+                });
+                
+                window.videoPlayer = player;
+            } catch (error) {
+                console.error('Video player error:', error);
+                showToast('Video player error. Trying direct link...', 'error');
+                
+                // Fallback to direct link
+                setTimeout(() => {
+                    window.open(videoUrl, '_blank');
+                }, 1000);
             }
         }
 
@@ -1827,39 +1651,48 @@ function generateFrontend() {
             showLoading();
             
             try {
-                const response = await fetch(\`/api/download/\${movieId}?quality=\${currentQuality}\`);
+                // Get sources first
+                const sourcesResponse = await fetch(\`/api/sources/\${movieId}\`);
+                const sourcesData = await sourcesResponse.json();
                 
-                if (response.ok) {
-                    const blob = await response.blob();
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = \`\${movieTitle.replace(/[^a-z0-9]/gi, '_')}_\${currentQuality}.mp4\`;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
+                if (sourcesData.success && sourcesData.data && sourcesData.data.sources) {
+                    const sources = sourcesData.data.sources;
+                    const videoSource = sources.find(source => 
+                        source.url && (source.type === 'mp4' || source.url.includes('.mp4'))
+                    );
                     
-                    addToDownloads(movieId, movieTitle, currentQuality);
-                    showToast(\`Downloading \${currentQuality} version...\`, 'success');
+                    if (videoSource && videoSource.url) {
+                        // Create download link
+                        const a = document.createElement('a');
+                        a.href = videoSource.url;
+                        a.download = \`\${movieTitle.replace(/[^a-z0-9]/gi, '_')}.mp4\`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        
+                        // Add to downloads
+                        addToDownloads(movieId, movieTitle, videoSource.quality || 'HD');
+                        showToast('Download started from API', 'success');
+                    } else {
+                        // Try direct download from sources endpoint
+                        window.open(\`/api/download/\${movieId}\`, '_blank');
+                        addToDownloads(movieId, movieTitle, 'Unknown');
+                        showToast('Downloading from API...', 'info');
+                    }
                 } else {
-                    throw new Error('Download failed');
+                    throw new Error('No download sources available');
                 }
             } catch (error) {
                 console.error('Download error:', error);
-                // Provide fallback download
-                const videoUrl = getFallbackVideoUrl(currentQuality);
-                const a = document.createElement('a');
-                a.href = videoUrl;
-                a.download = \`\${movieTitle.replace(/[^a-z0-9]/gi, '_')}_\${currentQuality}.mp4\`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                
-                addToDownloads(movieId, movieTitle, currentQuality);
-                showToast('Downloading sample video...', 'info');
+                showToast('Download not available from API', 'error');
             } finally {
                 hideLoading();
+            }
+        }
+
+        function downloadCurrentVideo() {
+            if (currentMovieId) {
+                downloadMovie(currentMovieId, \`Movie_\${currentMovieId}\`);
             }
         }
 
@@ -1876,18 +1709,10 @@ function generateFrontend() {
                 });
                 
                 localStorage.setItem('watchlist', JSON.stringify(watchlist));
-                updateBadges();
                 showToast('Added to watchlist', 'success');
             } else {
                 showToast('Already in watchlist', 'info');
             }
-        }
-
-        function removeFromWatchlist(movieId) {
-            watchlist = watchlist.filter(item => item.id !== movieId);
-            localStorage.setItem('watchlist', JSON.stringify(watchlist));
-            updateBadges();
-            showToast('Removed from watchlist', 'success');
         }
 
         // Downloads Management
@@ -1897,201 +1722,10 @@ function generateFrontend() {
                 title: movieTitle,
                 quality: quality,
                 downloadedAt: new Date().toISOString(),
-                size: quality === '720p' ? '1.5 GB' : quality === '480p' ? '800 MB' : '400 MB'
+                size: 'Unknown'
             });
             
             localStorage.setItem('downloads', JSON.stringify(downloads));
-            updateBadges();
-        }
-
-        // History Management
-        function addToHistory(movieId, action) {
-            history.unshift({
-                id: movieId,
-                action: action,
-                timestamp: new Date().toISOString()
-            });
-            
-            if (history.length > 50) history.pop();
-            localStorage.setItem('history', JSON.stringify(history));
-        }
-
-        // Update Badges
-        function updateBadges() {
-            notificationsBadge.textContent = watchlist.length + downloads.length;
-        }
-
-        // Page Navigation Functions
-        function loadTrendingMovies() {
-            content.innerHTML = \`
-                <div class="page-header">
-                    <h1><i class="fas fa-fire"></i> Trending Movies</h1>
-                </div>
-                <div class="movies-grid" id="allMovies">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading trending movies...</p>
-                    </div>
-                </div>
-            \`;
-            
-            fetch('/api/trending')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success && data.data) {
-                        displayMovies('allMovies', data.data);
-                    }
-                });
-        }
-
-        function showAllMovies() {
-            content.innerHTML = \`
-                <div class="page-header">
-                    <h1><i class="fas fa-film"></i> All Movies</h1>
-                    <div class="search-container" style="width: 300px;">
-                        <input type="text" id="allMoviesSearch" placeholder="Filter movies...">
-                        <div class="search-icon">
-                            <i class="fas fa-search"></i>
-                        </div>
-                    </div>
-                </div>
-                <div class="movies-grid" id="allMoviesList">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading all movies...</p>
-                    </div>
-                </div>
-            \`;
-            
-            // Load all movies from multiple searches
-            Promise.all([
-                fetch('/api/search/movie'),
-                fetch('/api/search/2023'),
-                fetch('/api/search/action')
-            ])
-            .then(responses => Promise.all(responses.map(r => r.json())))
-            .then(results => {
-                const allMovies = [];
-                results.forEach(result => {
-                    if (result.success && result.data) {
-                        allMovies.push(...result.data);
-                    }
-                });
-                
-                // Remove duplicates
-                const uniqueMovies = Array.from(new Set(allMovies.map(m => m.id)))
-                    .map(id => allMovies.find(m => m.id === id));
-                
-                displayMovies('allMoviesList', uniqueMovies.slice(0, 24));
-                
-                // Setup search filter
-                document.getElementById('allMoviesSearch').addEventListener('input', (e) => {
-                    const query = e.target.value.toLowerCase();
-                    const filtered = uniqueMovies.filter(movie => 
-                        movie.title.toLowerCase().includes(query)
-                    );
-                    displayMovies('allMoviesList', filtered.slice(0, 24));
-                });
-            });
-        }
-
-        function loadWatchlist() {
-            content.innerHTML = \`
-                <div class="page-header">
-                    <h1><i class="fas fa-bookmark"></i> My Watchlist</h1>
-                    <span class="text-muted" style="font-size: 1rem;">\${watchlist.length} movies</span>
-                </div>
-                \${watchlist.length > 0 ? \`
-                    <div class="watchlist-container">
-                        \${watchlist.map(movie => \`
-                            <div class="watchlist-item">
-                                <img src="\${movie.image}" alt="\${movie.title}" class="item-poster"
-                                     onerror="this.src='https://via.placeholder.com/80x120/1a1a1a/ffffff?text=Movie'">
-                                <div class="item-info">
-                                    <h3>\${movie.title}</h3>
-                                    <div class="item-meta">
-                                        Added \${new Date(movie.addedAt).toLocaleDateString()}
-                                    </div>
-                                    <div class="item-actions">
-                                        <button class="btn btn-sm btn-primary" onclick="showMovieDetails('\${movie.id}')">
-                                            <i class="fas fa-play"></i> Watch
-                                        </button>
-                                        <button class="btn btn-sm btn-secondary" onclick="removeFromWatchlist('\${movie.id}')">
-                                            <i class="fas fa-trash"></i> Remove
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        \`).join('')}
-                    </div>
-                \` : \`
-                    <div class="text-center" style="padding: 60px 20px;">
-                        <i class="fas fa-bookmark" style="font-size: 4rem; color: var(--gray); margin-bottom: 20px;"></i>
-                        <h3 style="margin-bottom: 15px; color: var(--gray);">Your watchlist is empty</h3>
-                        <p style="color: var(--gray-light); margin-bottom: 30px;">Add movies to your watchlist to watch them later</p>
-                        <button class="btn btn-primary" onclick="loadTrendingMovies()">
-                            <i class="fas fa-film"></i> Browse Movies
-                        </button>
-                    </div>
-                \`}
-            \`;
-        }
-
-        function loadDownloads() {
-            content.innerHTML = \`
-                <div class="page-header">
-                    <h1><i class="fas fa-download"></i> My Downloads</h1>
-                    <span class="text-muted" style="font-size: 1rem;">\${downloads.length} files</span>
-                </div>
-                \${downloads.length > 0 ? \`
-                    <div class="downloads-container">
-                        \${downloads.slice(0, 10).map(download => \`
-                            <div class="download-item">
-                                <div class="item-info">
-                                    <h3>\${download.title}</h3>
-                                    <div class="item-meta">
-                                        \${download.quality} • \${download.size} • \${new Date(download.downloadedAt).toLocaleDateString()}
-                                    </div>
-                                    <div class="item-actions">
-                                        <button class="btn btn-sm btn-primary" onclick="playDownload('\${download.id}')">
-                                            <i class="fas fa-play"></i> Play
-                                        </button>
-                                        <button class="btn btn-sm btn-secondary" onclick="deleteDownload('\${download.id}')">
-                                            <i class="fas fa-trash"></i> Delete
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        \`).join('')}
-                    </div>
-                \` : \`
-                    <div class="text-center" style="padding: 60px 20px;">
-                        <i class="fas fa-download" style="font-size: 4rem; color: var(--gray); margin-bottom: 20px;"></i>
-                        <h3 style="margin-bottom: 15px; color: var(--gray);">No downloads yet</h3>
-                        <p style="color: var(--gray-light); margin-bottom: 30px;">Download movies to watch them offline</p>
-                        <button class="btn btn-primary" onclick="loadTrendingMovies()">
-                            <i class="fas fa-download"></i> Browse Movies
-                        </button>
-                    </div>
-                \`}
-            \`;
-        }
-
-        function playDownload(downloadId) {
-            const download = downloads.find(d => d.id === downloadId);
-            if (download) {
-                const videoUrl = getFallbackVideoUrl(download.quality || '360p');
-                displayVideoPlayer(videoUrl, download.quality || '360p');
-                showToast('Playing downloaded content', 'success');
-            }
-        }
-
-        function deleteDownload(downloadId) {
-            downloads = downloads.filter(d => d.id !== downloadId);
-            localStorage.setItem('downloads', JSON.stringify(downloads));
-            updateBadges();
-            showToast('Download removed', 'success');
-            loadDownloads();
         }
 
         // Utility Functions
@@ -2146,33 +1780,7 @@ function generateFrontend() {
         }
 
         function goBack() {
-            content.innerHTML = \`
-                <div class="hero">
-                    <div class="hero-background"></div>
-                    <div class="hero-content">
-                        <h1>Welcome Back!</h1>
-                        <p>Continue your movie journey with thousands of titles.</p>
-                        <div class="hero-buttons">
-                            <button class="btn btn-primary btn-lg" onclick="loadTrendingMovies()">
-                                <i class="fas fa-play"></i> Browse Movies
-                            </button>
-                        </div>
-                    </div>
-                </div>
-                <div id="trendingSection">
-                    <div class="section-header">
-                        <h2><i class="fas fa-fire"></i> Trending Now</h2>
-                    </div>
-                    <div class="movies-grid" id="trendingMovies">
-                        <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                            <div class="loader"></div>
-                            <p class="text-muted mt-4">Loading movies...</p>
-                        </div>
-                    </div>
-                </div>
-            \`;
-            
-            loadMovieSections();
+            loadInitialMovies();
         }
 
         function goBackToDetails() {
@@ -2183,56 +1791,32 @@ function generateFrontend() {
             }
         }
 
-        function showAllTrending() {
-            loadTrendingMovies();
-        }
-
-        function showAllPopular() {
-            content.innerHTML = \`
-                <div class="page-header">
-                    <h1><i class="fas fa-star"></i> Popular Movies</h1>
-                </div>
-                <div class="movies-grid" id="popularMoviesList">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading popular movies...</p>
-                    </div>
-                </div>
-            \`;
+        // Test API Connection
+        async function testAPI() {
+            showLoading();
             
-            fetch('/api/search/popular')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success && data.data) {
-                        displayMovies('popularMoviesList', data.data);
-                    }
-                });
+            try {
+                const response = await fetch('/api/test');
+                const data = await response.json();
+                
+                if (data.success) {
+                    showToast('API is working! Found ' + data.count + ' movies', 'success');
+                } else {
+                    showToast('API test failed: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (error) {
+                showToast('API test failed: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
         }
 
-        function searchActionMovies() {
-            content.innerHTML = \`
-                <div class="page-header">
-                    <h1><i class="fas fa-explosion"></i> Action Movies</h1>
-                </div>
-                <div class="movies-grid" id="actionMoviesList">
-                    <div class="text-center" style="grid-column: 1 / -1; padding: 40px;">
-                        <div class="loader"></div>
-                        <p class="text-muted mt-4">Loading action movies...</p>
-                    </div>
-                </div>
-            \`;
-            
-            fetch('/api/search/action')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.success && data.data) {
-                        displayMovies('actionMoviesList', data.data);
-                    }
-                });
+        function showAPIDocs() {
+            showToast('API: https://movieapi.giftedtech.co.ke', 'info');
         }
 
-        function showPopularMovies() {
-            showAllPopular();
+        function loadMovies() {
+            loadInitialMovies();
         }
 
         // Setup Event Listeners
@@ -2240,11 +1824,6 @@ function generateFrontend() {
             // User button
             userBtn.addEventListener('click', () => {
                 showUserMenu();
-            });
-
-            // Notifications button
-            notificationsBtn.addEventListener('click', () => {
-                showToast(\`You have \${watchlist.length} movies in watchlist and \${downloads.length} downloads\`, 'info');
             });
         }
 
@@ -2271,22 +1850,18 @@ function generateFrontend() {
                     <div style="font-size: 0.8rem; opacity: 0.8;">\${currentUser.email}</div>
                 </div>
                 <div style="padding: 10px 0;">
-                    <a href="#" onclick="loadWatchlist()" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
+                    <a href="#" onclick="showToast('Watchlist: ' + watchlist.length + ' movies', 'info')" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
                         <i class="fas fa-bookmark"></i>
                         <span>Watchlist (\${watchlist.length})</span>
                     </a>
-                    <a href="#" onclick="loadDownloads()" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
+                    <a href="#" onclick="showToast('Downloads: ' + downloads.length + ' files', 'info')" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
                         <i class="fas fa-download"></i>
                         <span>Downloads (\${downloads.length})</span>
                     </a>
                     <div style="height: 1px; background: rgba(255, 255, 255, 0.1); margin: 10px 0;"></div>
-                    <a href="#" onclick="showToast('Settings coming soon', 'info')" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
-                        <i class="fas fa-cog"></i>
-                        <span>Settings</span>
-                    </a>
-                    <a href="#" onclick="showToast('Logged out successfully', 'success')" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
-                        <i class="fas fa-sign-out-alt"></i>
-                        <span>Logout</span>
+                    <a href="#" onclick="testAPI()" style="display: flex; align-items: center; gap: 10px; padding: 12px 20px; color: var(--dark-text); text-decoration: none; transition: var(--transition);">
+                        <i class="fas fa-wrench"></i>
+                        <span>Test API</span>
                     </a>
                 </div>
             \`;
@@ -2307,36 +1882,27 @@ function generateFrontend() {
 
         // Global functions
         window.addToWatchlist = addToWatchlist;
-        window.removeFromWatchlist = removeFromWatchlist;
         window.showMovieDetails = showMovieDetails;
         window.startStreaming = startStreaming;
         window.downloadMovie = downloadMovie;
         window.goBack = goBack;
         window.goBackToDetails = goBackToDetails;
-        window.loadTrendingMovies = loadTrendingMovies;
-        window.showAllMovies = showAllMovies;
-        window.loadWatchlist = loadWatchlist;
-        window.loadDownloads = loadDownloads;
-        window.showAllTrending = showAllTrending;
-        window.showAllPopular = showAllPopular;
-        window.searchActionMovies = searchActionMovies;
-        window.showPopularMovies = showPopularMovies;
-        window.changeQuality = changeQuality;
+        window.loadMovies = loadMovies;
+        window.testAPI = testAPI;
+        window.showAPIDocs = showAPIDocs;
         window.downloadCurrentVideo = downloadCurrentVideo;
-        window.playDownload = playDownload;
-        window.deleteDownload = deleteDownload;
         window.showToast = showToast;
     </script>
 </body>
 </html>`;
 }
 
-// API Routes
+// API Routes - ONLY GIFTED MOVIES API
 app.get('/api/search', async (req, res) => {
     try {
         const query = req.query.q;
         if (!query) {
-            return res.json({ success: true, data: [] });
+            return res.json({ success: false, error: 'Query parameter required' });
         }
         
         const data = await fetchFromGiftedAPI(`/api/search/${encodeURIComponent(query)}`);
@@ -2344,7 +1910,7 @@ app.get('/api/search', async (req, res) => {
         
     } catch (error) {
         console.error('Search API error:', error);
-        res.json({ success: false, error: error.message });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -2356,158 +1922,103 @@ app.get('/api/movie/:id', async (req, res) => {
         
     } catch (error) {
         console.error('Movie API error:', error);
-        res.json({ success: false, error: error.message });
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/sources/:id', async (req, res) => {
+    try {
+        const movieId = req.params.id;
+        const { season, episode } = req.query;
+        
+        let endpoint = `/api/sources/${movieId}`;
+        const params = {};
+        if (season) params.season = season;
+        if (episode) params.episode = episode;
+        
+        const data = await fetchFromGiftedAPI(endpoint, params);
+        res.json(data);
+        
+    } catch (error) {
+        console.error('Sources API error:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.get('/api/trending', async (req, res) => {
     try {
-        const movies = await getTrendingMovies();
-        res.json({ success: true, data: movies });
+        // Try common search terms to get trending movies
+        const queries = ['2024', 'movie', 'latest', 'new'];
         
-    } catch (error) {
-        console.error('Trending API error:', error);
-        res.json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/stream/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { quality = '360p' } = req.query;
-        
-        console.log(`Stream request for movie ${id} at quality ${quality}`);
-        
-        // Try to get sources from Gifted API
-        const sourcesData = await fetchFromGiftedAPI(`/api/sources/${id}`);
-        
-        if (sourcesData && sourcesData.success && sourcesData.data && sourcesData.data.sources) {
-            // Find the requested quality or the best available
-            const source = sourcesData.data.sources.find(s => s.quality === quality) || 
-                          sourcesData.data.sources[0];
-            
-            if (source && source.url) {
-                console.log(`Found stream URL: ${source.url}`);
-                return res.json({ 
-                    success: true, 
-                    url: source.url, 
-                    quality: source.quality 
-                });
+        for (const query of queries) {
+            const data = await fetchFromGiftedAPI(`/api/search/${query}`);
+            if (data && data.success && data.data && data.data.length > 0) {
+                return res.json({ success: true, data: data.data.slice(0, 20) });
             }
         }
         
-        // Fallback to working videos
-        console.log('Using fallback video');
-        const fallbackVideos = {
-            '360p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-            '480p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-            '720p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4'
-        };
-        
-        const videoUrl = fallbackVideos[quality] || fallbackVideos['360p'];
-        res.json({ 
-            success: true, 
-            url: videoUrl, 
-            quality: quality,
-            note: 'Using demo video (API streaming coming soon)'
-        });
+        res.json({ success: false, error: 'No trending movies found' });
         
     } catch (error) {
-        console.error('Stream API error:', error);
-        res.json({ 
-            success: true, 
-            url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-            quality: '360p',
-            note: 'Demo video (API unavailable)'
-        });
+        console.error('Trending API error:', error);
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.get('/api/download/:id', async (req, res) => {
     try {
-        const { id } = req.params;
-        const { quality = '360p' } = req.query;
+        const movieId = req.params.id;
         
-        console.log(`Download request for movie ${id} at quality ${quality}`);
-        
-        // Try Gifted API first
-        const sourcesData = await fetchFromGiftedAPI(`/api/sources/${id}`);
+        // Get sources first
+        const sourcesData = await fetchFromGiftedAPI(`/api/sources/${movieId}`);
         
         if (sourcesData && sourcesData.success && sourcesData.data && sourcesData.data.sources) {
-            const source = sourcesData.data.sources.find(s => s.quality === quality) || 
-                          sourcesData.data.sources[0];
+            // Find a downloadable source
+            const downloadSource = sourcesData.data.sources.find(source => 
+                source.url && (source.type === 'mp4' || source.url.includes('.mp4'))
+            );
             
-            if (source && source.url) {
-                // Set headers for download
-                res.setHeader('Content-Disposition', `attachment; filename="movie-${id}-${quality}.mp4"`);
-                res.setHeader('Content-Type', 'video/mp4');
-                
-                // Proxy the download
-                const videoResponse = await axios({
-                    method: 'GET',
-                    url: source.url,
-                    responseType: 'stream'
-                });
-                
-                videoResponse.data.pipe(res);
-                return;
+            if (downloadSource && downloadSource.url) {
+                // Redirect to the download URL
+                return res.redirect(downloadSource.url);
             }
         }
         
-        // Fallback to working video
-        const fallbackVideos = {
-            '360p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-            '480p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-            '720p': 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4'
-        };
-        
-        const videoUrl = fallbackVideos[quality] || fallbackVideos['360p'];
-        
-        res.setHeader('Content-Disposition', `attachment; filename="movie-${id}-${quality}.mp4"`);
-        res.setHeader('Content-Type', 'video/mp4');
-        
-        const videoResponse = await axios({
-            method: 'GET',
-            url: videoUrl,
-            responseType: 'stream'
-        });
-        
-        videoResponse.data.pipe(res);
+        res.status(404).json({ success: false, error: 'No download source available' });
         
     } catch (error) {
         console.error('Download API error:', error);
-        res.status(500).json({ success: false, error: 'Download failed' });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// User data endpoints
-app.post('/api/user/watchlist', (req, res) => {
-    const { userId, movieId, movieTitle, movieImage } = req.body;
-    
-    if (!usersData[userId]) {
-        usersData[userId] = { watchlist: [], downloads: [] };
-    }
-    
-    if (!usersData[userId].watchlist.find(item => item.id === movieId)) {
-        usersData[userId].watchlist.push({
-            id: movieId,
-            title: movieTitle,
-            image: movieImage,
-            addedAt: new Date().toISOString()
+// Test API endpoint
+app.get('/api/test', async (req, res) => {
+    try {
+        // Test the API by searching for a common term
+        const testData = await fetchFromGiftedAPI('/api/search/movie');
+        
+        if (testData && testData.success) {
+            res.json({ 
+                success: true, 
+                message: 'Gifted Movies API is working',
+                count: testData.data ? testData.data.length : 0
+            });
+        } else {
+            res.json({ 
+                success: false, 
+                error: testData ? testData.error : 'Unknown error',
+                message: 'Gifted Movies API test failed'
+            });
+        }
+        
+    } catch (error) {
+        res.status(500).json({ 
+            success: false, 
+            error: error.message,
+            message: 'Gifted Movies API test failed'
         });
     }
-    
-    res.json({ success: true, data: usersData[userId].watchlist });
-});
-
-app.get('/api/user/:userId/watchlist', (req, res) => {
-    const { userId } = req.params;
-    
-    if (!usersData[userId]) {
-        usersData[userId] = { watchlist: [], downloads: [] };
-    }
-    
-    res.json({ success: true, data: usersData[userId].watchlist });
 });
 
 // Serve PWA files
@@ -2516,7 +2027,7 @@ app.get('/manifest.json', (req, res) => {
     res.send(JSON.stringify({
         "name": "CLOUD.MOVIES",
         "short_name": "CloudMovies",
-        "description": "Stream Movies & TV Shows - Bera Tech",
+        "description": "Stream Movies - Gifted Movies API Only",
         "start_url": "/",
         "display": "standalone",
         "background_color": "#0a0a0a",
@@ -2568,23 +2079,20 @@ app.listen(PORT, () => {
     📍 Port: ${PORT}
     🌐 URL: http://localhost:${PORT}
     
-    ✅ GIFTED MOVIES API INTEGRATED
-    ✅ NO URL PASTING REQUIRED
-    ✅ TYPE & SEARCH MOVIES
-    ✅ STREAMING & DOWNLOADS
-    ✅ WATCHLIST & LIBRARY
+    ⚡ PURE GIFTED MOVIES API IMPLEMENTATION
+    🚫 NO MOCKUPS, NO DEMOS, NO FALLBACKS
     
-    🎬 Primary API: Gifted Movies API
-    ⚡ Real-time Search & Streaming
-    📱 Full PWA Support
+    🔗 API Endpoints:
+       - Search: /api/search?q={query}
+       - Movie Details: /api/movie/{id}
+       - Streaming Sources: /api/sources/{id}
+       - Trending: /api/trending
+       - Download: /api/download/{id}
     
-    HOW TO USE:
-    1. Search for movies by typing in search bar
-    2. Click any movie to view details
-    3. Click "Stream Now" to watch
-    4. Click "Download" to save offline
-    5. Use bookmark icon to add to watchlist
+    📊 Only shows real data from Gifted Movies API
+    ❌ If API fails, shows error message
+    ✅ No placeholder images or mock data
     
-    © 2024 Bera Tech - All rights reserved
+    © 2024 Bera Tech - Gifted Movies API Only
     `);
 });
