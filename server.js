@@ -3,7 +3,6 @@ const fetch = require('node-fetch');
 const cors = require('cors');
 const compression = require('compression');
 const morgan = require('morgan');
-const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,92 +20,175 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static files
 app.use(express.static('public'));
 
-// Proxy API requests to avoid CORS issues
-app.get('/api/proxy/:endpoint/*', async (req, res) => {
+// API Proxy endpoints
+app.get('/api/search/:query', async (req, res) => {
     try {
-        const endpoint = req.params.endpoint;
-        const path = req.params[0];
-        const query = req.query.query || '';
+        const { query } = req.params;
+        const { page = '1' } = req.query;
         
-        let apiUrl = `${API_BASE}/${endpoint}/${path}`;
+        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(query)}`);
+        const data = await response.json();
         
-        // Handle query parameters
-        if (req.query.season) apiUrl += `?season=${req.query.season}`;
-        if (req.query.episode) {
-            apiUrl += req.query.season ? `&episode=${req.query.episode}` : `?episode=${req.query.episode}`;
+        // Transform data to match our expected format
+        if (data.results && data.results.items) {
+            const items = data.results.items.map(item => ({
+                id: item.subjectId,
+                title: item.title,
+                description: item.description,
+                year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
+                type: item.subjectType === 1 ? 'movie' : 'tv',
+                cover: item.cover?.url || item.thumbnail,
+                poster: item.cover?.url || item.thumbnail,
+                genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
+                duration: item.duration,
+                rating: item.imdbRatingValue,
+                releaseDate: item.releaseDate
+            }));
+            
+            res.json({
+                success: true,
+                results: items,
+                pagination: data.results.pager || {
+                    page: parseInt(page),
+                    totalPages: Math.ceil((data.results.pager?.totalCount || 0) / 24),
+                    hasMore: data.results.pager?.hasMore || false
+                }
+            });
+        } else {
+            res.json({ success: true, results: [], pagination: { page: 1, totalPages: 1, hasMore: false } });
         }
+    } catch (error) {
+        console.error('Search error:', error);
+        res.status(500).json({ success: false, error: 'Search failed' });
+    }
+});
+
+// Info endpoint
+app.get('/api/info/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const response = await fetch(`${API_BASE}/info/${id}`);
+        const data = await response.json();
+        
+        if (data.results && data.results.subject) {
+            const subject = data.results.subject;
+            const stars = data.results.stars || [];
+            const resource = data.results.resource || {};
+            
+            // Extract episodes if it's a TV series
+            let episodes = [];
+            if (resource.seasons && Array.isArray(resource.seasons)) {
+                resource.seasons.forEach(season => {
+                    if (season.se !== undefined && season.resolutions) {
+                        const maxEp = season.maxEp || season.resolutions[0]?.epNum || 1;
+                        for (let i = 1; i <= maxEp; i++) {
+                            episodes.push({
+                                season: season.se,
+                                episode: i
+                            });
+                        }
+                    }
+                });
+            }
+            
+            res.json({
+                success: true,
+                data: {
+                    id: subject.subjectId,
+                    title: subject.title,
+                    description: subject.description,
+                    type: subject.subjectType === 1 ? 'movie' : 'tv',
+                    cover: subject.cover?.url || subject.thumbnail,
+                    poster: subject.cover?.url || subject.thumbnail,
+                    trailer: subject.trailer?.videoAddress?.url,
+                    genre: subject.genre ? subject.genre.split(',').map(g => g.trim()) : [],
+                    releaseDate: subject.releaseDate,
+                    duration: subject.duration,
+                    rating: subject.imdbRatingValue,
+                    country: subject.countryName,
+                    cast: stars.map(star => ({
+                        name: star.name,
+                        character: star.character,
+                        avatar: star.avatarUrl
+                    })),
+                    episodes: episodes,
+                    seasons: resource.seasons || [],
+                    hasResource: subject.hasResource
+                }
+            });
+        } else {
+            res.status(404).json({ success: false, error: 'Content not found' });
+        }
+    } catch (error) {
+        console.error('Info error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch info' });
+    }
+});
+
+// Sources endpoint
+app.get('/api/sources/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { season, episode } = req.query;
+        
+        let apiUrl = `${API_BASE}/sources/${id}`;
+        if (season) apiUrl += `?season=${season}`;
+        if (episode) apiUrl += `${season ? '&' : '?'}episode=${episode}`;
         
         const response = await fetch(apiUrl);
         const data = await response.json();
-        res.json(data);
+        
+        if (data.results && Array.isArray(data.results)) {
+            res.json({
+                success: true,
+                sources: data.results.map(source => ({
+                    id: source.id,
+                    quality: source.quality,
+                    download_url: source.download_url,
+                    size: source.size,
+                    format: source.format
+                }))
+            });
+        } else {
+            res.json({ success: true, sources: [] });
+        }
     } catch (error) {
-        console.error('Proxy error:', error);
-        res.status(500).json({ error: 'API request failed' });
+        console.error('Sources error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch sources' });
     }
 });
 
-// Stream video
-app.get('/stream/:id', async (req, res) => {
+// Stream endpoint - using the direct download URL from API
+app.get('/api/stream/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const { season, episode, quality = '720p' } = req.query;
         
-        // Get sources from API
+        // First get sources
         let sourcesUrl = `${API_BASE}/sources/${id}`;
         if (season) sourcesUrl += `?season=${season}`;
         if (episode) sourcesUrl += `${season ? '&' : '?'}episode=${episode}`;
         
-        const response = await fetch(sourcesUrl);
-        const data = await response.json();
+        const sourcesResponse = await fetch(sourcesUrl);
+        const sourcesData = await sourcesResponse.json();
         
-        // Find the requested quality
-        const source = data.sources?.find(s => s.quality === quality);
-        
-        if (!source || !source.download_url) {
-            return res.status(404).json({ error: 'Stream not found' });
+        if (!sourcesData.results || sourcesData.results.length === 0) {
+            return res.status(404).json({ error: 'No sources available' });
         }
         
-        // Forward to actual video URL
-        const videoResponse = await fetch(source.download_url);
-        
-        // Set appropriate headers for streaming
-        res.set({
-            'Content-Type': 'video/mp4',
-            'Content-Length': videoResponse.headers.get('content-length'),
-            'Accept-Ranges': 'bytes'
-        });
-        
-        videoResponse.body.pipe(res);
+        // Find the requested quality
+        const source = sourcesData.results.find(s => s.quality === quality);
+        if (!source) {
+            // Fallback to first available quality
+            const fallbackSource = sourcesData.results[0];
+            res.redirect(fallbackSource.download_url);
+        } else {
+            res.redirect(source.download_url);
+        }
     } catch (error) {
         console.error('Stream error:', error);
         res.status(500).json({ error: 'Streaming failed' });
-    }
-});
-
-// Download endpoint
-app.get('/download/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { season, episode, quality = '720p' } = req.query;
-        
-        let sourcesUrl = `${API_BASE}/sources/${id}`;
-        if (season) sourcesUrl += `?season=${season}`;
-        if (episode) sourcesUrl += `${season ? '&' : '?'}episode=${episode}`;
-        
-        const response = await fetch(sourcesUrl);
-        const data = await response.json();
-        
-        const source = data.sources?.find(s => s.quality === quality);
-        
-        if (!source || !source.download_url) {
-            return res.status(404).json({ error: 'Download not available' });
-        }
-        
-        // Redirect to direct download URL
-        res.redirect(source.download_url);
-    } catch (error) {
-        console.error('Download error:', error);
-        res.status(500).json({ error: 'Download failed' });
     }
 });
 
@@ -128,6 +210,9 @@ app.get('/', (req, res) => {
         
         <!-- Icons -->
         <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎬</text></svg>">
+        
+        <!-- Font Awesome -->
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         
         <!-- Styles -->
         <style>
@@ -246,6 +331,10 @@ app.get('/', (req, res) => {
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
                 text-shadow: 0 0 15px rgba(0, 243, 255, 0.3);
+                text-decoration: none;
+                display: flex;
+                align-items: center;
+                gap: 10px;
             }
             
             .search-container {
@@ -307,17 +396,6 @@ app.get('/', (req, res) => {
                 border: 1px solid rgba(0, 243, 255, 0.2);
                 position: relative;
                 overflow: hidden;
-            }
-            
-            .hero-section::before {
-                content: '';
-                position: absolute;
-                top: -50%;
-                left: -50%;
-                width: 200%;
-                height: 200%;
-                background: radial-gradient(circle, rgba(0, 243, 255, 0.1) 0%, transparent 70%);
-                animation: pulse 10s infinite linear;
             }
             
             .hero-title {
@@ -416,7 +494,7 @@ app.get('/', (req, res) => {
                 left: 0;
                 width: 100%;
                 height: 100%;
-                background: rgba(0, 0, 0, 0.9);
+                background: rgba(0, 0, 0, 0.95);
                 z-index: 1000;
                 overflow-y: auto;
             }
@@ -457,13 +535,20 @@ app.get('/', (req, res) => {
             }
             
             /* Player */
-            .video-player {
+            .video-container {
                 width: 100%;
-                height: 500px;
+                max-width: 800px;
+                margin: 0 auto 2rem;
                 background: #000;
                 border-radius: 10px;
                 overflow: hidden;
-                margin-bottom: 2rem;
+                position: relative;
+            }
+            
+            #video-player {
+                width: 100%;
+                height: 450px;
+                background: #000;
             }
             
             .quality-selector, .episode-selector {
@@ -494,9 +579,10 @@ app.get('/', (req, res) => {
                 display: flex;
                 gap: 1rem;
                 margin-top: 2rem;
+                flex-wrap: wrap;
             }
             
-            .stream-btn, .download-btn {
+            .stream-btn, .download-btn, .trailer-btn {
                 padding: 12px 24px;
                 border: none;
                 border-radius: 25px;
@@ -519,7 +605,12 @@ app.get('/', (req, res) => {
                 color: var(--dark-bg);
             }
             
-            .stream-btn:hover, .download-btn:hover {
+            .trailer-btn {
+                background: linear-gradient(45deg, var(--neon-pink), #ff0080);
+                color: white;
+            }
+            
+            .stream-btn:hover, .download-btn:hover, .trailer-btn:hover {
                 transform: translateY(-2px);
                 box-shadow: 0 5px 20px rgba(0, 243, 255, 0.4);
             }
@@ -578,12 +669,18 @@ app.get('/', (req, res) => {
                     gap: 1rem;
                 }
                 
-                .video-player {
+                #video-player {
                     height: 300px;
                 }
                 
                 .logo-text {
                     font-size: 3rem;
+                }
+                
+                .modal-content {
+                    margin: 0;
+                    border-radius: 0;
+                    min-height: 100vh;
                 }
             }
             
@@ -598,6 +695,10 @@ app.get('/', (req, res) => {
                 
                 .action-buttons {
                     flex-direction: column;
+                }
+                
+                .modal-body {
+                    padding: 1rem;
                 }
             }
             
@@ -664,6 +765,45 @@ app.get('/', (req, res) => {
             ::-webkit-scrollbar-thumb:hover {
                 background: linear-gradient(var(--neon-purple), var(--neon-pink));
             }
+            
+            /* Loading state */
+            .loading {
+                opacity: 0.7;
+                pointer-events: none;
+            }
+            
+            /* Error message */
+            .error-message {
+                grid-column: 1 / -1;
+                text-align: center;
+                padding: 3rem;
+                color: var(--neon-pink);
+                font-size: 1.2rem;
+            }
+            
+            /* Cast section */
+            .cast-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 1rem;
+                margin: 1.5rem 0;
+            }
+            
+            .cast-card {
+                background: rgba(0, 243, 255, 0.05);
+                border-radius: 10px;
+                padding: 1rem;
+                text-align: center;
+            }
+            
+            .cast-avatar {
+                width: 80px;
+                height: 80px;
+                border-radius: 50%;
+                object-fit: cover;
+                margin-bottom: 0.5rem;
+                border: 2px solid var(--neon-blue);
+            }
         </style>
     </head>
     <body>
@@ -682,10 +822,15 @@ app.get('/', (req, res) => {
         <!-- Header -->
         <header>
             <div class="header-content">
-                <div class="site-logo">CLOUD.MOVIES</div>
+                <a href="/" class="site-logo">
+                    <i class="fas fa-film"></i>
+                    CLOUD.MOVIES
+                </a>
                 <div class="search-container">
                     <input type="text" id="search-input" placeholder="Search movies and TV series...">
-                    <button class="search-btn" id="search-btn">🔍</button>
+                    <button class="search-btn" id="search-btn">
+                        <i class="fas fa-search"></i>
+                    </button>
                 </div>
             </div>
         </header>
@@ -695,6 +840,10 @@ app.get('/', (req, res) => {
             <section class="hero-section">
                 <h1 class="hero-title">Stream Unlimited Movies & Series</h1>
                 <p class="hero-subtitle">Neon-powered entertainment at your fingertips</p>
+                <div style="margin-top: 2rem;">
+                    <input type="text" id="home-search" placeholder="Try 'Avatar', 'Stranger Things', 'Black Panther'..." 
+                           style="width: 100%; max-width: 500px; padding: 15px; border-radius: 30px; border: 2px solid var(--neon-blue); background: rgba(0,0,0,0.3); color: white; font-size: 1.1rem;">
+                </div>
             </section>
 
             <!-- Genre Navigation -->
@@ -736,11 +885,18 @@ app.get('/', (req, res) => {
         <!-- Footer -->
         <footer>
             <div class="footer-content">
-                <div class="footer-brand">CLOUD.MOVIES</div>
-                <p>Professional Neon Streaming Platform</p>
+                <div class="footer-brand">
+                    <i class="fas fa-cloud"></i> CLOUD.MOVIES
+                </div>
+                <p>Professional Neon Streaming Platform by Bera Tech</p>
                 <p class="footer-contact">
-                    Developed by <strong>Bruce Bera</strong> - Bera Tech<br>
-                    Contact: <a href="https://wa.me/254743983206" class="contact-link" target="_blank">wa.me/254743983206</a>
+                    Developed by <strong>Bruce Bera</strong><br>
+                    Contact: <a href="https://wa.me/254743983206" class="contact-link" target="_blank">
+                        <i class="fab fa-whatsapp"></i> wa.me/254743983206
+                    </a>
+                </p>
+                <p style="margin-top: 1rem; font-size: 0.9rem; color: var(--text-secondary);">
+                    Powered by Gifted Movies API
                 </p>
             </div>
         </footer>
@@ -748,12 +904,16 @@ app.get('/', (req, res) => {
         <!-- JavaScript -->
         <script>
             // API Configuration
-            const API_BASE = '/api/proxy';
             let currentPage = 1;
             let totalPages = 1;
             let currentSearch = '';
             let currentGenre = 'all';
+            let currentContent = [];
             let deferredPrompt;
+            let selectedMovieId = null;
+            let selectedSeason = null;
+            let selectedEpisode = null;
+            let selectedQuality = '720p';
 
             // Genres
             const genres = [
@@ -775,14 +935,25 @@ app.get('/', (req, res) => {
                 // Initialize genres
                 initializeGenres();
                 
-                // Load initial content
-                await loadTrendingContent();
-                
-                // Initialize search
+                // Initialize search functionality
                 initializeSearch();
+                
+                // Load trending content
+                await loadTrendingContent();
                 
                 // Initialize PWA
                 initializePWA();
+                
+                // Setup home search
+                document.getElementById('home-search').addEventListener('keypress', async (e) => {
+                    if (e.key === 'Enter') {
+                        const query = e.target.value.trim();
+                        if (query) {
+                            document.getElementById('search-input').value = query;
+                            await performSearch(query);
+                        }
+                    }
+                });
             });
 
             // Initialize genres navigation
@@ -799,9 +970,8 @@ app.get('/', (req, res) => {
             }
 
             // Filter content by genre
-            async function filterByGenre(genre) {
+            function filterByGenre(genre) {
                 currentGenre = genre.toLowerCase();
-                currentPage = 1;
                 
                 // Update active genre button
                 document.querySelectorAll('.genre-btn').forEach(btn => {
@@ -809,10 +979,15 @@ app.get('/', (req, res) => {
                     if (btn.textContent === genre) btn.classList.add('active');
                 });
                 
-                if (currentSearch) {
-                    await performSearch(currentSearch);
+                if (currentGenre === 'all') {
+                    displayContent(currentContent);
                 } else {
-                    await loadTrendingContent();
+                    const filtered = currentContent.filter(item => 
+                        item.genre && item.genre.some(g => 
+                            g.toLowerCase().includes(currentGenre)
+                        )
+                    );
+                    displayContent(filtered);
                 }
             }
 
@@ -821,22 +996,18 @@ app.get('/', (req, res) => {
                 const searchInput = document.getElementById('search-input');
                 const searchBtn = document.getElementById('search-btn');
                 
-                // Search on button click
                 searchBtn.addEventListener('click', async () => {
-                    currentSearch = searchInput.value.trim();
-                    if (currentSearch) {
-                        currentPage = 1;
-                        await performSearch(currentSearch);
+                    const query = searchInput.value.trim();
+                    if (query) {
+                        await performSearch(query);
                     }
                 });
                 
-                // Search on Enter key
                 searchInput.addEventListener('keypress', async (e) => {
                     if (e.key === 'Enter') {
-                        currentSearch = searchInput.value.trim();
-                        if (currentSearch) {
-                            currentPage = 1;
-                            await performSearch(currentSearch);
+                        const query = e.target.value.trim();
+                        if (query) {
+                            await performSearch(query);
                         }
                     }
                 });
@@ -846,268 +1017,505 @@ app.get('/', (req, res) => {
             async function loadTrendingContent() {
                 showLoading();
                 try {
-                    const response = await fetch(\`\${API_BASE}/search/trending\`);
+                    // Search for popular movies to show initially
+                    const response = await fetch('/api/search/avengers');
                     const data = await response.json();
-                    displayContent(data.results || []);
+                    
+                    if (data.success && data.results.length > 0) {
+                        currentContent = data.results;
+                        displayContent(data.results);
+                        updatePagination(data.pagination);
+                    } else {
+                        // Fallback search
+                        await performSearch('movie');
+                    }
                 } catch (error) {
                     console.error('Error loading content:', error);
-                    displayError('Failed to load content');
+                    showError('Failed to load content. Please try again.');
                 }
             }
 
             // Perform search
             async function performSearch(query) {
                 showLoading();
+                currentSearch = query;
+                currentPage = 1;
+                
                 try {
-                    const response = await fetch(\`\${API_BASE}/search/\${encodeURIComponent(query)}?page=\${currentPage}\`);
+                    const response = await fetch(\`/api/search/\${encodeURIComponent(query)}\`);
                     const data = await response.json();
-                    displayContent(data.results || []);
-                    updatePagination(data);
+                    
+                    if (data.success) {
+                        currentContent = data.results;
+                        displayContent(data.results);
+                        updatePagination(data.pagination);
+                        
+                        // Scroll to content
+                        document.querySelector('.content-grid').scrollIntoView({ 
+                            behavior: 'smooth' 
+                        });
+                    } else {
+                        showError('No results found. Try another search.');
+                    }
                 } catch (error) {
                     console.error('Search error:', error);
-                    displayError('Search failed');
+                    showError('Search failed. Please try again.');
                 }
             }
 
             // Display content in grid
             function displayContent(items) {
                 const grid = document.getElementById('content-grid');
-                grid.innerHTML = '';
                 
-                if (items.length === 0) {
-                    grid.innerHTML = '<p style="grid-column: 1/-1; text-align: center; padding: 3rem;">No content found</p>';
+                if (!items || items.length === 0) {
+                    grid.innerHTML = '<div class="error-message">No content found</div>';
                     return;
                 }
                 
-                items.forEach(item => {
-                    const card = createContentCard(item);
-                    grid.appendChild(card);
-                });
-            }
-
-            // Create content card
-            function createContentCard(item) {
-                const card = document.createElement('div');
-                card.className = 'content-card';
-                card.innerHTML = \`
-                    <img src="\${item.cover || item.poster}" alt="\${item.title}" class="card-poster" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23000%22/><text x=%2250%22 y=%2250%22 font-size=%2214%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%2300f3ff%22>\${item.title.substring(0, 10)}</text></svg>'">
-                    <div class="card-info">
-                        <h3 class="card-title" title="\${item.title}">\${item.title}</h3>
-                        <div class="card-meta">
-                            <span>\${item.year || 'N/A'}</span>
-                            <span>\${item.type === 'tv' ? 'TV Series' : 'Movie'}</span>
+                grid.innerHTML = items.map(item => \`
+                    <div class="content-card" data-id="\${item.id}">
+                        <img src="\${item.cover || item.poster || 'https://via.placeholder.com/300x450?text=No+Image'}" 
+                             alt="\${item.title}" 
+                             class="card-poster"
+                             onerror="this.src='https://via.placeholder.com/300x450?text=No+Image'">
+                        <div class="card-info">
+                            <h3 class="card-title" title="\${item.title}">\${item.title}</h3>
+                            <div class="card-meta">
+                                <span>\${item.year || 'N/A'}</span>
+                                <span>\${item.type === 'tv' ? 'TV' : 'Movie'}</span>
+                            </div>
+                            \${item.rating ? \`<div style="color: gold; margin-top: 5px;">⭐ \${item.rating}</div>\` : ''}
                         </div>
                     </div>
-                \`;
+                \`).join('');
                 
-                card.addEventListener('click', () => showDetails(item.id));
-                return card;
+                // Add click event listeners
+                grid.querySelectorAll('.content-card').forEach(card => {
+                    card.addEventListener('click', async () => {
+                        const id = card.dataset.id;
+                        await showDetails(id);
+                    });
+                });
             }
 
             // Show content details
             async function showDetails(id) {
                 showLoading();
+                selectedMovieId = id;
+                
                 try {
-                    const response = await fetch(\`\${API_BASE}/info/\${id}\`);
+                    const response = await fetch(\`/api/info/\${id}\`);
                     const data = await response.json();
-                    displayDetails(data);
+                    
+                    if (data.success) {
+                        displayDetails(data.data);
+                    } else {
+                        showError('Failed to load details.');
+                    }
                 } catch (error) {
                     console.error('Details error:', error);
-                    displayError('Failed to load details');
+                    showError('Failed to load details.');
                 }
             }
 
             // Display details in modal
-            function displayDetails(data) {
+            function displayDetails(movie) {
                 const modal = document.getElementById('detail-modal');
                 const modalBody = document.getElementById('modal-body');
                 const modalTitle = document.getElementById('modal-title');
                 
-                modalTitle.textContent = data.title || 'Details';
+                modalTitle.textContent = movie.title;
                 
+                // Reset selections
+                selectedSeason = null;
+                selectedEpisode = null;
+                selectedQuality = '720p';
+                
+                // Check if it's a TV series
+                const isTV = movie.type === 'tv';
+                const hasEpisodes = movie.episodes && movie.episodes.length > 0;
+                
+                // Build episodes HTML if available
                 let episodesHtml = '';
-                if (data.episodes && data.episodes.length > 0) {
+                if (hasEpisodes) {
+                    const seasons = [...new Set(movie.episodes.map(ep => ep.season))];
+                    
                     episodesHtml = \`
                         <div class="episode-selector">
-                            <h4>Episodes</h4>
-                            \${data.episodes.map(ep => 
-                                \`<button class="episode-btn" data-season="\${ep.season}" data-episode="\${ep.episode}">
-                                    S\${ep.season}E\${ep.episode}
-                                </button>\`
-                            ).join('')}
+                            <h3><i class="fas fa-tv"></i> Seasons & Episodes</h3>
+                            <div style="margin-bottom: 1rem;">
+                                <strong>Select Season:</strong>
+                                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                                    \${seasons.map(season => \`
+                                        <button class="season-btn" data-season="\${season}">
+                                            Season \${season}
+                                        </button>
+                                    \`).join('')}
+                                </div>
+                            </div>
+                            <div id="episodes-container" style="display: none;">
+                                <strong>Select Episode:</strong>
+                                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap;" id="episodes-list">
+                                </div>
+                            </div>
+                        </div>
+                    \`;
+                }
+                
+                // Build cast HTML if available
+                let castHtml = '';
+                if (movie.cast && movie.cast.length > 0) {
+                    castHtml = \`
+                        <div style="margin: 2rem 0;">
+                            <h3><i class="fas fa-users"></i> Cast</h3>
+                            <div class="cast-grid">
+                                \${movie.cast.slice(0, 6).map(person => \`
+                                    <div class="cast-card">
+                                        <img src="\${person.avatar || 'https://via.placeholder.com/80?text=No+Image'}" 
+                                             alt="\${person.name}" 
+                                             class="cast-avatar"
+                                             onerror="this.src='https://via.placeholder.com/80?text=No+Image'">
+                                        <div>
+                                            <strong>\${person.name}</strong>
+                                            <div style="font-size: 0.9rem; color: var(--text-secondary);">
+                                                \${person.character || 'Actor'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                \`).join('')}
+                            </div>
                         </div>
                     \`;
                 }
                 
                 modalBody.innerHTML = \`
                     <div class="detail-content">
-                        <div style="display: grid; grid-template-columns: 300px 1fr; gap: 2rem; margin-bottom: 2rem;">
-                            <img src="\${data.cover || data.poster}" alt="\${data.title}" 
-                                 style="width: 100%; border-radius: 10px; border: 2px solid var(--neon-blue);">
+                        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 2rem; margin-bottom: 2rem;">
                             <div>
-                                <h3 style="font-size: 2rem; margin-bottom: 1rem;">\${data.title}</h3>
-                                <p style="margin-bottom: 1rem; color: var(--text-secondary);">\${data.description || 'No description available'}</p>
-                                <div style="display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem;">
-                                    \${data.genre ? data.genre.map(g => \`<span style="background: rgba(0, 243, 255, 0.1); padding: 5px 10px; border-radius: 15px;">\${g}</span>\`).join('') : ''}
+                                <img src="\${movie.poster || movie.cover || 'https://via.placeholder.com/300x450?text=No+Image'}" 
+                                     alt="\${movie.title}" 
+                                     style="width: 100%; border-radius: 10px; border: 2px solid var(--neon-blue);"
+                                     onerror="this.src='https://via.placeholder.com/300x450?text=No+Image'">
+                            </div>
+                            <div>
+                                <h2 style="font-size: 2rem; margin-bottom: 1rem; color: var(--neon-blue);">\${movie.title}</h2>
+                                <div style="display: flex; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+                                    \${movie.genre && movie.genre.length > 0 ? movie.genre.map(g => \`
+                                        <span style="background: rgba(0, 243, 255, 0.1); padding: 5px 15px; border-radius: 20px; border: 1px solid var(--neon-blue);">
+                                            \${g}
+                                        </span>
+                                    \`).join('') : ''}
                                 </div>
-                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">
-                                    <div><strong>Release:</strong> \${data.releaseDate || 'N/A'}</div>
-                                    <div><strong>Duration:</strong> \${data.duration || 'N/A'}</div>
-                                    <div><strong>Rating:</strong> \${data.rating || 'N/A'}</div>
-                                    <div><strong>Type:</strong> \${data.type === 'tv' ? 'TV Series' : 'Movie'}</div>
+                                <p style="margin-bottom: 1.5rem; line-height: 1.6; color: var(--text-secondary);">
+                                    \${movie.description || 'No description available.'}
+                                </p>
+                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-bottom: 1.5rem;">
+                                    <div><strong><i class="fas fa-calendar"></i> Release:</strong> \${movie.releaseDate || 'N/A'}</div>
+                                    <div><strong><i class="fas fa-clock"></i> Duration:</strong> \${movie.duration ? Math.floor(movie.duration / 60) + ' min' : 'N/A'}</div>
+                                    <div><strong><i class="fas fa-star"></i> Rating:</strong> \${movie.rating || 'N/A'}</div>
+                                    <div><strong><i class="fas fa-globe"></i> Country:</strong> \${movie.country || 'N/A'}</div>
+                                    <div><strong><i class="fas fa-film"></i> Type:</strong> \${isTV ? 'TV Series' : 'Movie'}</div>
+                                    \${movie.hasResource ? '<div><strong><i class="fas fa-check-circle"></i> Available:</strong> Yes</div>' : ''}
                                 </div>
                             </div>
                         </div>
                         
+                        \${castHtml}
+                        
                         \${episodesHtml}
                         
                         <div class="quality-selector">
-                            <h4>Quality</h4>
-                            <button class="quality-btn active" data-quality="360p">360p</button>
-                            <button class="quality-btn" data-quality="480p">480p</button>
-                            <button class="quality-btn" data-quality="720p">720p</button>
-                            <button class="quality-btn" data-quality="1080p">1080p</button>
+                            <h3><i class="fas fa-hd"></i> Select Quality</h3>
+                            <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                                <button class="quality-btn active" data-quality="360p">360p</button>
+                                <button class="quality-btn" data-quality="480p">480p</button>
+                                <button class="quality-btn" data-quality="720p">720p</button>
+                            </div>
                         </div>
                         
                         <div class="action-buttons">
-                            <button class="stream-btn" id="stream-btn">
-                                <span>🎬</span> Stream Now
+                            <button class="stream-btn" id="play-stream">
+                                <i class="fas fa-play"></i> Stream Now
                             </button>
-                            <button class="download-btn" id="download-btn">
-                                <span>⬇️</span> Download
+                            <button class="download-btn" id="download-movie">
+                                <i class="fas fa-download"></i> Download
                             </button>
+                            \${movie.trailer ? \`
+                                <button class="trailer-btn" id="play-trailer">
+                                    <i class="fas fa-play-circle"></i> Watch Trailer
+                                </button>
+                            \` : ''}
+                        </div>
+                        
+                        <div id="video-container" class="video-container" style="display: none;">
+                            <video id="video-player" controls>
+                                Your browser does not support the video tag.
+                            </video>
                         </div>
                     </div>
                 \`;
                 
+                // Setup season/episode selectors for TV shows
+                if (hasEpisodes) {
+                    modalBody.querySelectorAll('.season-btn').forEach(btn => {
+                        btn.addEventListener('click', function() {
+                            selectedSeason = this.dataset.season;
+                            
+                            // Update active season
+                            modalBody.querySelectorAll('.season-btn').forEach(b => 
+                                b.classList.remove('active')
+                            );
+                            this.classList.add('active');
+                            
+                            // Show episodes for this season
+                            const episodesContainer = modalBody.querySelector('#episodes-container');
+                            const episodesList = modalBody.querySelector('#episodes-list');
+                            
+                            const seasonEpisodes = movie.episodes.filter(ep => ep.season == selectedSeason);
+                            
+                            episodesList.innerHTML = seasonEpisodes.map(ep => \`
+                                <button class="episode-btn" data-episode="\${ep.episode}">
+                                    Episode \${ep.episode}
+                                </button>
+                            \`).join('');
+                            
+                            episodesContainer.style.display = 'block';
+                            
+                            // Setup episode click
+                            episodesList.querySelectorAll('.episode-btn').forEach(epBtn => {
+                                epBtn.addEventListener('click', function() {
+                                    selectedEpisode = this.dataset.episode;
+                                    
+                                    // Update active episode
+                                    episodesList.querySelectorAll('.episode-btn').forEach(b => 
+                                        b.classList.remove('active')
+                                    );
+                                    this.classList.add('active');
+                                });
+                            });
+                        });
+                    });
+                }
+                
                 // Setup quality selector
                 modalBody.querySelectorAll('.quality-btn').forEach(btn => {
                     btn.addEventListener('click', function() {
-                        modalBody.querySelectorAll('.quality-btn').forEach(b => b.classList.remove('active'));
+                        selectedQuality = this.dataset.quality;
+                        
+                        modalBody.querySelectorAll('.quality-btn').forEach(b => 
+                            b.classList.remove('active')
+                        );
                         this.classList.add('active');
                     });
                 });
                 
-                // Setup episode selector
-                modalBody.querySelectorAll('.episode-btn').forEach(btn => {
-                    btn.addEventListener('click', function() {
-                        modalBody.querySelectorAll('.episode-btn').forEach(b => b.classList.remove('active'));
-                        this.classList.add('active');
-                    });
-                });
-                
-                // Setup stream button
-                modalBody.querySelector('#stream-btn').addEventListener('click', () => {
-                    const quality = modalBody.querySelector('.quality-btn.active').dataset.quality;
-                    const episodeBtn = modalBody.querySelector('.episode-btn.active');
-                    
-                    let streamUrl = \`/stream/\${data.id}?quality=\${quality}\`;
-                    if (episodeBtn) {
-                        streamUrl += \`&season=\${episodeBtn.dataset.season}&episode=\${episodeBtn.dataset.episode}\`;
-                    }
-                    
-                    // Create video player
-                    const videoPlayer = document.createElement('div');
-                    videoPlayer.className = 'video-player';
-                    videoPlayer.innerHTML = \`
-                        <video controls autoplay style="width: 100%; height: 100%;">
-                            <source src="\${streamUrl}" type="video/mp4">
-                            Your browser does not support the video tag.
-                        </video>
-                    \`;
-                    
-                    modalBody.insertBefore(videoPlayer, modalBody.firstChild);
+                // Setup play stream button
+                modalBody.querySelector('#play-stream').addEventListener('click', async () => {
+                    await playStream();
                 });
                 
                 // Setup download button
-                modalBody.querySelector('#download-btn').addEventListener('click', () => {
-                    const quality = modalBody.querySelector('.quality-btn.active').dataset.quality;
-                    const episodeBtn = modalBody.querySelector('.episode-btn.active');
-                    
-                    let downloadUrl = \`/download/\${data.id}?quality=\${quality}\`;
-                    if (episodeBtn) {
-                        downloadUrl += \`&season=\${episodeBtn.dataset.season}&episode=\${episodeBtn.dataset.episode}\`;
-                    }
-                    
-                    window.open(downloadUrl, '_blank');
+                modalBody.querySelector('#download-movie').addEventListener('click', async () => {
+                    await downloadMovie();
                 });
+                
+                // Setup trailer button
+                if (movie.trailer) {
+                    modalBody.querySelector('#play-trailer').addEventListener('click', () => {
+                        const videoContainer = modalBody.querySelector('#video-container');
+                        const videoPlayer = modalBody.querySelector('#video-player');
+                        
+                        videoPlayer.src = movie.trailer;
+                        videoContainer.style.display = 'block';
+                        videoPlayer.play();
+                    });
+                }
                 
                 modal.style.display = 'block';
                 document.body.style.overflow = 'hidden';
                 
                 // Close modal
-                document.getElementById('close-modal').addEventListener('click', () => {
-                    modal.style.display = 'none';
-                    document.body.style.overflow = 'auto';
-                });
+                document.getElementById('close-modal').addEventListener('click', closeModal);
                 
                 // Close modal on outside click
                 modal.addEventListener('click', (e) => {
                     if (e.target === modal) {
-                        modal.style.display = 'none';
-                        document.body.style.overflow = 'auto';
+                        closeModal();
                     }
                 });
             }
 
+            // Play stream
+            async function playStream() {
+                if (!selectedMovieId) return;
+                
+                try {
+                    const videoContainer = document.querySelector('#video-container');
+                    const videoPlayer = document.querySelector('#video-player');
+                    
+                    // Build URL with parameters
+                    let streamUrl = \`/api/stream/\${selectedMovieId}?quality=\${selectedQuality}\`;
+                    if (selectedSeason) streamUrl += \`&season=\${selectedSeason}\`;
+                    if (selectedEpisode) streamUrl += \`&episode=\${selectedEpisode}\`;
+                    
+                    videoPlayer.src = streamUrl;
+                    videoContainer.style.display = 'block';
+                    videoPlayer.play();
+                    
+                    // Scroll to video
+                    videoContainer.scrollIntoView({ behavior: 'smooth' });
+                } catch (error) {
+                    console.error('Stream error:', error);
+                    showError('Failed to start stream. Please try again.');
+                }
+            }
+
+            // Download movie
+            async function downloadMovie() {
+                if (!selectedMovieId) return;
+                
+                try {
+                    // First get sources to get the direct download URL
+                    let sourcesUrl = \`/api/sources/\${selectedMovieId}\`;
+                    if (selectedSeason) sourcesUrl += \`?season=\${selectedSeason}\`;
+                    if (selectedEpisode) sourcesUrl += \`\${selectedSeason ? '&' : '?'}episode=\${selectedEpisode}\`;
+                    
+                    const response = await fetch(sourcesUrl);
+                    const data = await response.json();
+                    
+                    if (data.success && data.sources.length > 0) {
+                        // Find the selected quality or fallback to first available
+                        const source = data.sources.find(s => s.quality === selectedQuality) || data.sources[0];
+                        
+                        if (source && source.download_url) {
+                            // Create a temporary link to trigger download
+                            const link = document.createElement('a');
+                            link.href = source.download_url;
+                            link.download = \`\${document.getElementById('modal-title').textContent} - \${selectedQuality}.mp4\`;
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                        } else {
+                            showError('Download not available for this quality.');
+                        }
+                    } else {
+                        showError('Download sources not available.');
+                    }
+                } catch (error) {
+                    console.error('Download error:', error);
+                    showError('Download failed. Please try again.');
+                }
+            }
+
             // Update pagination
-            function updatePagination(data) {
-                const pagination = document.getElementById('pagination');
-                if (!data.totalPages || data.totalPages <= 1) {
-                    pagination.innerHTML = '';
+            function updatePagination(pagination) {
+                const paginationDiv = document.getElementById('pagination');
+                
+                if (!pagination || pagination.totalPages <= 1) {
+                    paginationDiv.innerHTML = '';
                     return;
                 }
                 
-                totalPages = data.totalPages;
+                totalPages = pagination.totalPages;
                 
-                let paginationHtml = '<div style="display: flex; justify-content: center; gap: 1rem; margin-top: 2rem;">';
+                let html = '<div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin: 2rem 0;">';
                 
                 if (currentPage > 1) {
-                    paginationHtml += \`<button onclick="changePage(\${currentPage - 1})" style="padding: 10px 20px; background: var(--neon-blue); border: none; border-radius: 5px; color: white; cursor: pointer;">Previous</button>\`;
+                    html += \`<button onclick="changePage(\${currentPage - 1})" 
+                                    style="padding: 10px 20px; background: var(--neon-blue); border: none; border-radius: 5px; color: white; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                                <i class="fas fa-chevron-left"></i> Previous
+                            </button>\`;
                 }
                 
-                paginationHtml += \`<span style="display: flex; align-items: center;">Page \${currentPage} of \${totalPages}</span>\`;
+                html += \`<span style="padding: 10px 20px; background: rgba(0, 243, 255, 0.1); border-radius: 5px;">
+                            Page \${currentPage} of \${totalPages}
+                         </span>\`;
                 
                 if (currentPage < totalPages) {
-                    paginationHtml += \`<button onclick="changePage(\${currentPage + 1})" style="padding: 10px 20px; background: var(--neon-blue); border: none; border-radius: 5px; color: white; cursor: pointer;">Next</button>\`;
+                    html += \`<button onclick="changePage(\${currentPage + 1})" 
+                                    style="padding: 10px 20px; background: var(--neon-blue); border: none; border-radius: 5px; color: white; cursor: pointer; display: flex; align-items: center; gap: 5px;">
+                                Next <i class="fas fa-chevron-right"></i>
+                            </button>\`;
                 }
                 
-                paginationHtml += '</div>';
-                pagination.innerHTML = paginationHtml;
+                html += '</div>';
+                paginationDiv.innerHTML = html;
             }
 
             // Change page
             window.changePage = async function(page) {
+                if (page < 1 || page > totalPages) return;
+                
                 currentPage = page;
-                if (currentSearch) {
-                    await performSearch(currentSearch);
-                } else {
-                    await loadTrendingContent();
+                showLoading();
+                
+                try {
+                    const response = await fetch(\`/api/search/\${encodeURIComponent(currentSearch)}?page=\${page}\`);
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        currentContent = data.results;
+                        displayContent(data.results);
+                        updatePagination(data.pagination);
+                        
+                        // Scroll to top
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }
+                } catch (error) {
+                    console.error('Page change error:', error);
+                    showError('Failed to load page.');
                 }
-                window.scrollTo(0, 0);
             }
 
-            // Show loading indicator
+            // Show loading state
             function showLoading() {
                 const grid = document.getElementById('content-grid');
-                grid.innerHTML = '<p style="grid-column: 1/-1; text-align: center; padding: 3rem;">Loading...</p>';
+                grid.innerHTML = \`
+                    <div style="grid-column: 1/-1; text-align: center; padding: 3rem;">
+                        <div style="display: inline-block; padding: 20px; border-radius: 10px; background: rgba(0, 243, 255, 0.1);">
+                            <i class="fas fa-spinner fa-spin" style="font-size: 2rem; color: var(--neon-blue);"></i>
+                            <div style="margin-top: 10px; color: var(--neon-blue);">Loading...</div>
+                        </div>
+                    </div>
+                \`;
             }
 
-            // Display error
-            function displayError(message) {
+            // Show error message
+            function showError(message) {
                 const grid = document.getElementById('content-grid');
-                grid.innerHTML = \`<p style="grid-column: 1/-1; text-align: center; padding: 3rem; color: var(--neon-pink);">\${message}</p>\`;
+                grid.innerHTML = \`
+                    <div class="error-message">
+                        <i class="fas fa-exclamation-triangle" style="font-size: 2rem; margin-bottom: 1rem;"></i>
+                        <div>\${message}</div>
+                    </div>
+                \`;
+            }
+
+            // Close modal
+            function closeModal() {
+                const modal = document.getElementById('detail-modal');
+                const videoPlayer = document.querySelector('#video-player');
+                
+                if (videoPlayer) {
+                    videoPlayer.pause();
+                    videoPlayer.src = '';
+                }
+                
+                modal.style.display = 'none';
+                document.body.style.overflow = 'auto';
             }
 
             // PWA Initialization
             function initializePWA() {
                 // Service Worker Registration
                 if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.register('/sw.js').then(() => {
-                        console.log('Service Worker registered');
-                    }).catch(err => {
-                        console.error('Service Worker registration failed:', err);
-                    });
+                    navigator.serviceWorker.register('/sw.js')
+                        .then(registration => {
+                            console.log('Service Worker registered:', registration);
+                        })
+                        .catch(error => {
+                            console.error('Service Worker registration failed:', error);
+                        });
                 }
                 
                 // Install Prompt
@@ -1118,26 +1526,39 @@ app.get('/', (req, res) => {
                     // Show install prompt after 5 seconds
                     setTimeout(() => {
                         const installPrompt = document.getElementById('install-prompt');
-                        installPrompt.style.display = 'flex';
+                        if (installPrompt) {
+                            installPrompt.style.display = 'flex';
+                        }
                     }, 5000);
                 });
                 
                 // Install button
-                document.getElementById('install-btn').addEventListener('click', async () => {
-                    if (deferredPrompt) {
-                        deferredPrompt.prompt();
-                        const { outcome } = await deferredPrompt.userChoice;
-                        if (outcome === 'accepted') {
-                            document.getElementById('install-prompt').style.display = 'none';
+                const installBtn = document.getElementById('install-btn');
+                if (installBtn) {
+                    installBtn.addEventListener('click', async () => {
+                        if (deferredPrompt) {
+                            deferredPrompt.prompt();
+                            const { outcome } = await deferredPrompt.userChoice;
+                            if (outcome === 'accepted') {
+                                document.getElementById('install-prompt').style.display = 'none';
+                            }
+                            deferredPrompt = null;
                         }
-                        deferredPrompt = null;
-                    }
-                });
+                    });
+                }
                 
                 // Close install prompt
-                document.getElementById('close-install').addEventListener('click', () => {
-                    document.getElementById('install-prompt').style.display = 'none';
-                });
+                const closeInstall = document.getElementById('close-install');
+                if (closeInstall) {
+                    closeInstall.addEventListener('click', () => {
+                        document.getElementById('install-prompt').style.display = 'none';
+                    });
+                }
+                
+                // Detect if app is running as PWA
+                if (window.matchMedia('(display-mode: standalone)').matches) {
+                    console.log('Running as PWA');
+                }
             }
         </script>
     </body>
@@ -1150,53 +1571,80 @@ app.get('/sw.js', (req, res) => {
     res.set('Content-Type', 'application/javascript');
     res.send(`
         const CACHE_NAME = 'cloud-movies-v1';
+        
+        // Assets to cache on install
         const urlsToCache = [
             '/',
-            '/styles.css',
-            '/app.js'
+            '/manifest.json'
         ];
-
+        
+        // Install event
         self.addEventListener('install', event => {
             event.waitUntil(
                 caches.open(CACHE_NAME)
-                    .then(cache => cache.addAll(urlsToCache))
-            );
-        });
-
-        self.addEventListener('fetch', event => {
-            event.respondWith(
-                caches.match(event.request)
-                    .then(response => {
-                        if (response) {
-                            return response;
-                        }
-                        return fetch(event.request).then(response => {
-                            if (!response || response.status !== 200 || response.type !== 'basic') {
-                                return response;
-                            }
-                            const responseToCache = response.clone();
-                            caches.open(CACHE_NAME)
-                                .then(cache => {
-                                    cache.put(event.request, responseToCache);
-                                });
-                            return response;
-                        });
+                    .then(cache => {
+                        console.log('Opened cache');
+                        return cache.addAll(urlsToCache);
                     })
             );
         });
-
+        
+        // Activate event
         self.addEventListener('activate', event => {
-            const cacheWhitelist = [CACHE_NAME];
             event.waitUntil(
                 caches.keys().then(cacheNames => {
                     return Promise.all(
                         cacheNames.map(cacheName => {
-                            if (!cacheWhitelist.includes(cacheName)) {
+                            if (cacheName !== CACHE_NAME) {
+                                console.log('Deleting old cache:', cacheName);
                                 return caches.delete(cacheName);
                             }
                         })
                     );
                 })
+            );
+        });
+        
+        // Fetch event
+        self.addEventListener('fetch', event => {
+            // Skip non-GET requests and chrome-extension requests
+            if (event.request.method !== 'GET' || event.request.url.startsWith('chrome-extension://')) {
+                return;
+            }
+            
+            event.respondWith(
+                caches.match(event.request)
+                    .then(response => {
+                        // Return cached response if found
+                        if (response) {
+                            return response;
+                        }
+                        
+                        // Clone the request
+                        const fetchRequest = event.request.clone();
+                        
+                        return fetch(fetchRequest).then(response => {
+                            // Check if valid response
+                            if (!response || response.status !== 200 || response.type !== 'basic') {
+                                return response;
+                            }
+                            
+                            // Clone the response
+                            const responseToCache = response.clone();
+                            
+                            // Cache the response
+                            caches.open(CACHE_NAME)
+                                .then(cache => {
+                                    cache.put(event.request, responseToCache);
+                                });
+                            
+                            return response;
+                        }).catch(error => {
+                            console.error('Fetch failed:', error);
+                            // Return offline page or cached response
+                            return caches.match('/');
+                        });
+                    })
             );
         });
     `);
@@ -1212,11 +1660,40 @@ app.get('/manifest.json', (req, res) => {
         "display": "standalone",
         "background_color": "#0a0a1a",
         "theme_color": "#00f3ff",
+        "orientation": "portrait",
         "icons": [
             {
-                "src": "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22 fill=%22%2300f3ff%22>🎬</text></svg>",
+                "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' fill='%2300f3ff'>🎬</text></svg>",
                 "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any maskable"
+            },
+            {
+                "src": "https://api.dicebear.com/7.x/icons/svg?seed=cloudmovies&backgroundType=gradientLinear&backgroundRotation=45&backgroundColor=00f3ff,bc13fe",
+                "sizes": "192x192",
                 "type": "image/svg+xml"
+            },
+            {
+                "src": "https://api.dicebear.com/7.x/icons/svg?seed=cloudmovies&backgroundType=gradientLinear&backgroundRotation=45&backgroundColor=00f3ff,bc13fe",
+                "sizes": "512x512",
+                "type": "image/svg+xml"
+            }
+        ],
+        "categories": ["entertainment", "movies", "video"],
+        "shortcuts": [
+            {
+                "name": "Search Movies",
+                "short_name": "Search",
+                "description": "Search for movies and TV series",
+                "url": "/?search",
+                "icons": [{ "src": "https://api.dicebear.com/7.x/icons/svg?seed=search&backgroundColor=00f3ff", "sizes": "96x96" }]
+            },
+            {
+                "name": "Trending Now",
+                "short_name": "Trending",
+                "description": "Browse trending content",
+                "url": "/?trending",
+                "icons": [{ "src": "https://api.dicebear.com/7.x/icons/svg?seed=trending&backgroundColor=bc13fe", "sizes": "96x96" }]
             }
         ]
     });
@@ -1227,4 +1704,5 @@ app.listen(PORT, () => {
     console.log(`🚀 CLOUD.MOVIES server running on port ${PORT}`);
     console.log(`📱 Developed by Bruce Bera - Bera Tech`);
     console.log(`📞 Contact: wa.me/254743983206`);
+    console.log(`🌐 Open http://localhost:${PORT} in your browser`);
 });
