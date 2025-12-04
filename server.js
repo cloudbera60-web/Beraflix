@@ -1,172 +1,124 @@
-// =====================
-// BERA TECH - CLOUD.MOVIES
-// Single-file PWA Movie Streaming App
-// Using Gifted Movies API
-// =====================
-
 const express = require("express");
 const axios = require("axios");
-const compression = require("compression");
-const helmet = require("helmet");
 const path = require("path");
-
 const app = express();
-app.use(helmet());
-app.use(compression());
-app.use(express.json());
+const PORT = process.env.PORT || 3000;
 
-// ---------------- API ROUTES ----------------
-
-// SEARCH MOVIES
-app.get("/api/search", async (req, res) => {
-  try {
-    const q = req.query.q;
-    if (!q) return res.status(400).json({ error: "Missing ?q=" });
-
-    const url = `https://movieapi.giftedtech.co.ke/api/search/${encodeURIComponent(q)}`;
-    const response = await axios.get(url);
-
-    res.json(response.data);
-  } catch (err) {
-    console.error("Search Error:", err.message);
-    res.status(500).json({ error: "Failed to fetch movies." });
-  }
-});
-
-// MOVIE INFO
-app.get("/api/info/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-    const url = `https://movieapi.giftedtech.co.ke/api/info/${id}`;
-    const response = await axios.get(url);
-
-    res.json(response.data);
-  } catch (err) {
-    console.error("Movie Info Error:", err.message);
-    res.status(500).json({ error: "Failed to fetch movie info." });
-  }
-});
-
-// SOURCES (STREAMING LINKS)
-app.get("/api/sources/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-
-    let url = `https://movieapi.giftedtech.co.ke/api/sources/${id}`;
-
-    const response = await axios.get(url);
-
-    res.json(response.data);
-  } catch (err) {
-    console.error("Sources Error:", err.message);
-    res.status(500).json({ error: "Failed to fetch sources." });
-  }
-});
-
-// ---------------- FRONTEND ----------------
+// =========================
+// STATIC FRONTEND ROUTE
+// =========================
 app.get("/", (req, res) => {
   res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-<title>CLOUD.MOVIES – Bera Tech</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-
+<title>BeraFix Movies</title>
 <style>
-  body { margin:0; background:#0b0b0b; color:white; font-family:Arial; }
-  header { padding:15px; background:#111; position:sticky; top:0; z-index:10; display:flex; justify-content:space-between; align-items:center; }
-  h1 { margin:0; color:#ff2a2a; font-size:24px; }
-  #searchBox { width:90%; padding:12px; border-radius:8px; border:none; font-size:16px; margin:10px auto; display:block; }
-  #results { padding:10px; display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
-  .movie { background:#1a1a1a; padding:10px; border-radius:10px; text-align:center; cursor:pointer; transition:0.3s; }
-  .movie:hover { transform:scale(1.03); }
-  .movie img { width:100%; border-radius:8px; }
-
-  #detailsPage { padding:20px; display:none; }
-  #backBtn { background:#ff2a2a; padding:10px; border:none; color:white; border-radius:6px; margin-bottom:15px; }
-
-  video { width:100%; margin-top:20px; border-radius:10px; }
+    body {
+        margin: 0;
+        padding: 0;
+        background: #0d0d0d;
+        font-family: Arial, sans-serif;
+        color: white;
+    }
+    header {
+        background: #111;
+        padding: 15px;
+        text-align: center;
+        font-size: 22px;
+    }
+    #search-box {
+        display: flex;
+        justify-content: center;
+        margin: 20px 0;
+    }
+    input {
+        width: 300px;
+        padding: 10px;
+        border-radius: 6px;
+        border: none;
+        outline: none;
+        font-size: 16px;
+    }
+    button {
+        padding: 10px 15px;
+        margin-left: 10px;
+        background: #ff3333;
+        border: none;
+        border-radius: 6px;
+        color: white;
+        cursor: pointer;
+        font-size: 16px;
+    }
+    #results {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 15px;
+        padding: 20px;
+    }
+    .movie-card {
+        background: #1a1a1a;
+        padding: 10px;
+        border-radius: 8px;
+        text-align: center;
+        cursor: pointer;
+        transition: 0.3s;
+    }
+    .movie-card:hover {
+        transform: scale(1.05);
+    }
+    .movie-card img {
+        width: 100%;
+        border-radius: 6px;
+    }
 </style>
-
 </head>
 <body>
 
-<header>
-  <h1>CLOUD.MOVIES</h1>
-</header>
+<header>BeraFix – Movie Search</header>
 
-<input id="searchBox" placeholder="Search movies...">
+<div id="search-box">
+    <input id="query" type="text" placeholder="Search Movies...">
+    <button onclick="searchMovie()">Search</button>
+</div>
 
 <div id="results"></div>
 
-<div id="detailsPage">
-  <button id="backBtn">← Back</button>
-  <div id="detailsContent"></div>
-</div>
-
 <script>
-// SEARCH MOVIES LIVE
-document.getElementById("searchBox").addEventListener("keyup", async function() {
-  const q = this.value.trim();
-  if (!q) return (document.getElementById("results").innerHTML = "");
+async function searchMovie() {
+    const q = document.getElementById("query").value;
+    if (!q) return alert("Type a movie name!");
 
-  const res = await fetch("/api/search?q=" + q);
-  const data = await res.json();
+    const res = await fetch('/api/movies/search?q=' + encodeURIComponent(q));
+    const data = await res.json();
 
-  const container = document.getElementById("results");
-  container.innerHTML = "";
+    let html = "";
+    if (data.results && data.results.items) {
+        data.results.items.forEach(movie => {
+            html += \`
+                <div class="movie-card" onclick="openMovie('\${movie.subjectId}')">
+                    <img src="\${movie.thumbnail}" />
+                    <h4>\${movie.title}</h4>
+                </div>
+            \`;
+        });
+    }
 
-  if (!data.results || !data.results.items) return;
-
-  data.results.items.forEach(movie => {
-    const div = document.createElement("div");
-    div.className = "movie";
-    div.innerHTML = \`
-      <img src="\${movie.poster}" />
-      <h3>\${movie.title}</h3>
-    \`;
-
-    div.onclick = () => openDetails(movie.id);
-    container.appendChild(div);
-  });
-});
-
-// OPEN MOVIE DETAILS
-async function openDetails(id) {
-  document.getElementById("results").style.display = "none";
-  document.getElementById("detailsPage").style.display = "block";
-
-  const res = await fetch("/api/info/" + id);
-  const info = await res.json();
-
-  const srcRes = await fetch("/api/sources/" + id);
-  const sources = await srcRes.json();
-
-  let videoSources = "";
-
-  if (sources.sources) {
-    sources.sources.forEach(s => {
-      videoSources += \`
-        <p>
-          <a href="\${s.url}" style="color:#ff2a2a" download>Download \${s.quality}</a>
-        </p>
-      \`;
-    });
-  }
-
-  document.getElementById("detailsContent").innerHTML = \`
-    <h2>\${info.title}</h2>
-    <p>\${info.description}</p>
-    <img src="\${info.poster}" style="width:100%; border-radius:10px; margin-top:10px;" />
-    <h3 style="margin-top:20px;">Download Options:</h3>
-    \${videoSources}
-  \`;
+    document.getElementById("results").innerHTML = html;
 }
 
-document.getElementById("backBtn").onclick = () => {
-  document.getElementById("detailsPage").style.display = "none";
-  document.getElementById("results").style.display = "grid";
-};
+async function openMovie(id) {
+    const info = await fetch('/api/movies/info/' + id);
+    const movie = await info.json();
+
+    let m = movie.results.subject;
+
+    alert(
+        "Title: " + m.title + 
+        "\\nYear: " + m.releaseDate +
+        "\\nRating: " + m.imdbRatingValue
+    );
+}
 </script>
 
 </body>
@@ -174,4 +126,63 @@ document.getElementById("backBtn").onclick = () => {
   `);
 });
 
-app.listen(PORT, () => console.log("CLOUD.MOVIES running on port " + PORT));
+// =========================
+// MOVIE API ROUTES
+// =========================
+
+// 🔍 Search Movies
+app.get('/api/movies/search', async (req, res) => {
+  try {
+    const q = req.query.q;
+    if (!q) return res.status(400).json({ error: "Missing query" });
+
+    const response = await axios.get(
+      `https://movieapi.giftedtech.co.ke/api/search/${encodeURIComponent(q)}`
+    );
+
+    res.json(response.data);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Search failed" });
+  }
+});
+
+// 📘 Movie Info
+app.get('/api/movies/info/:id', async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://movieapi.giftedtech.co.ke/api/info/${req.params.id}`
+    );
+    res.json(response.data);
+
+  } catch (err) {
+    res.status(500).json({ error: "Movie info failed" });
+  }
+});
+
+// ⬇ Movie Download Links
+app.get('/api/movies/sources/:id', async (req, res) => {
+  try {
+    let url = `https://movieapi.giftedtech.co.ke/api/sources/${req.params.id}`;
+
+    const { season, episode } = req.query;
+
+    if (season) url += `?season=${season}`;
+    if (season && episode) url += `&episode=${episode}`;
+
+    const response = await axios.get(url);
+
+    res.json(response.data);
+
+  } catch (err) {
+    res.status(500).json({ error: "Sources failed" });
+  }
+});
+
+// =========================
+// START SERVER
+// =========================
+app.listen(PORT, () => {
+  console.log("Server running on port " + PORT);
+});
