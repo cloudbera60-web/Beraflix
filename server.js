@@ -3,9 +3,52 @@ const fetch = require('node-fetch');
 const cors = require('cors');
 const compression = require('compression');
 const morgan = require('morgan');
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// MongoDB Connection
+mongoose.connect('mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/movie_streaming?retryWrites=true&w=majority&appName=Cluster0', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+});
+
+// Database Models
+const User = mongoose.model('User', new mongoose.Schema({
+    username: { type: String, unique: true },
+    email: { type: String, unique: true },
+    password: String,
+    profilePic: { type: String, default: '' },
+    watchHistory: [{
+        contentId: String,
+        title: String,
+        type: String,
+        season: Number,
+        episode: Number,
+        position: Number,
+        duration: Number,
+        watchedAt: { type: Date, default: Date.now },
+        thumbnail: String
+    }],
+    watchlist: [{
+        contentId: String,
+        title: String,
+        type: String,
+        thumbnail: String,
+        addedAt: { type: Date, default: Date.now }
+    }],
+    preferences: {
+        autoPlay: { type: Boolean, default: true },
+        defaultQuality: { type: String, default: '720p' },
+        language: { type: String, default: 'en' },
+        notifications: { type: Boolean, default: true }
+    },
+    createdAt: { type: Date, default: Date.now }
+}));
 
 // API Base URL
 const API_BASE = 'https://movieapi.giftedtech.co.ke/api';
@@ -17,24 +60,312 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Serve static files
+app.use(express.static('public'));
+
 // Cache for trending content
 let trendingCache = { data: null, timestamp: 0 };
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
-// Serve static files
-app.use(express.static('public'));
+// Featured content (curated list)
+const FEATURED_CONTENT = [
+    { id: 'featured-action', query: 'action', title: 'Action Blockbusters' },
+    { id: 'featured-comedy', query: 'comedy', title: 'Laugh Out Loud' },
+    { id: 'featured-scifi', query: 'sci-fi', title: 'Sci-Fi Adventures' },
+    { id: 'featured-drama', query: 'drama', title: 'Critically Acclaimed' },
+    { id: 'featured-2024', query: '2024', title: 'New Releases' }
+];
 
-// API Proxy endpoints
-app.get('/api/search/:query', async (req, res) => {
+// Authentication middleware
+const authenticateToken = async (req, res, next) => {
+    const token = req.headers['authorization']?.split(' ')[1];
+    if (!token) return next();
+    
     try {
-        const { query } = req.params;
-        const { page = '1' } = req.query;
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'movie-streaming-secret');
+        req.user = await User.findById(decoded.userId);
+        next();
+    } catch (err) {
+        next();
+    }
+};
+
+// ====================
+// USER ENDPOINTS
+// ====================
+
+// User registration
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { username, email, password } = req.body;
         
-        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(query)}`);
+        // Check if user exists
+        const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+        if (existingUser) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'User already exists' 
+            });
+        }
+        
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Create user
+        const user = new User({
+            username,
+            email,
+            password: hashedPassword,
+            preferences: {
+                autoPlay: true,
+                defaultQuality: '720p',
+                language: 'en',
+                notifications: true
+            }
+        });
+        
+        await user.save();
+        
+        // Create token
+        const token = jwt.sign(
+            { userId: user._id, username: user.username },
+            process.env.JWT_SECRET || 'movie-streaming-secret',
+            { expiresIn: '30d' }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                profilePic: user.profilePic,
+                preferences: user.preferences
+            }
+        });
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ success: false, message: 'Registration failed' });
+    }
+});
+
+// User login
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        
+        // Find user
+        const user = await User.findOne({ 
+            $or: [{ email: username }, { username: username }] 
+        });
+        
+        if (!user) {
+            return res.status(401).json({ 
+                success: false, 
+                message: 'Invalid credentials' 
+            });
+        }
+        
+        // Check password
+        const validPassword = await bcrypt.compare(password, user.password);
+        if (!validPassword) {
+            return res.status(401).json({ 
+                success: false, 
+                message: 'Invalid credentials' 
+            });
+        }
+        
+        // Create token
+        const token = jwt.sign(
+            { userId: user._id, username: user.username },
+            process.env.JWT_SECRET || 'movie-streaming-secret',
+            { expiresIn: '30d' }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            user: {
+                id: user._id,
+                username: user.username,
+                email: user.email,
+                profilePic: user.profilePic,
+                preferences: user.preferences
+            }
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ success: false, message: 'Login failed' });
+    }
+});
+
+// Get user profile
+app.get('/api/user/profile', authenticateToken, async (req, res) => {
+    if (!req.user) {
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
+    }
+    
+    res.json({
+        success: true,
+        user: {
+            id: req.user._id,
+            username: req.user.username,
+            email: req.user.email,
+            profilePic: req.user.profilePic,
+            preferences: req.user.preferences,
+            watchlistCount: req.user.watchlist.length,
+            historyCount: req.user.watchHistory.length
+        }
+    });
+});
+
+// Add to watch history
+app.post('/api/user/history', authenticateToken, async (req, res) => {
+    if (!req.user) {
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
+    }
+    
+    try {
+        const { contentId, title, type, season, episode, position, duration, thumbnail } = req.body;
+        
+        // Remove existing entry if exists
+        req.user.watchHistory = req.user.watchHistory.filter(
+            item => !(item.contentId === contentId && 
+                     item.season === season && 
+                     item.episode === episode)
+        );
+        
+        // Add new entry at beginning
+        req.user.watchHistory.unshift({
+            contentId,
+            title,
+            type,
+            season: season || 0,
+            episode: episode || 0,
+            position,
+            duration,
+            thumbnail,
+            watchedAt: new Date()
+        });
+        
+        // Keep only last 50 items
+        if (req.user.watchHistory.length > 50) {
+            req.user.watchHistory = req.user.watchHistory.slice(0, 50);
+        }
+        
+        await req.user.save();
+        
+        res.json({ success: true, message: 'History updated' });
+    } catch (error) {
+        console.error('History error:', error);
+        res.status(500).json({ success: false, message: 'Failed to update history' });
+    }
+});
+
+// Get watch history
+app.get('/api/user/history', authenticateToken, async (req, res) => {
+    if (!req.user) {
+        return res.json({ success: true, history: [] });
+    }
+    
+    res.json({
+        success: true,
+        history: req.user.watchHistory.slice(0, 20)
+    });
+});
+
+// Add/remove from watchlist
+app.post('/api/user/watchlist', authenticateToken, async (req, res) => {
+    if (!req.user) {
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
+    }
+    
+    try {
+        const { contentId, title, type, thumbnail, action = 'add' } = req.body;
+        
+        if (action === 'add') {
+            // Check if already in watchlist
+            const exists = req.user.watchlist.some(item => item.contentId === contentId);
+            if (!exists) {
+                req.user.watchlist.unshift({
+                    contentId,
+                    title,
+                    type,
+                    thumbnail,
+                    addedAt: new Date()
+                });
+            }
+        } else if (action === 'remove') {
+            req.user.watchlist = req.user.watchlist.filter(item => item.contentId !== contentId);
+        }
+        
+        await req.user.save();
+        
+        res.json({ 
+            success: true, 
+            message: `Watchlist ${action === 'add' ? 'updated' : 'item removed'}`,
+            inWatchlist: action === 'add'
+        });
+    } catch (error) {
+        console.error('Watchlist error:', error);
+        res.status(500).json({ success: false, message: 'Failed to update watchlist' });
+    }
+});
+
+// Get watchlist
+app.get('/api/user/watchlist', authenticateToken, async (req, res) => {
+    if (!req.user) {
+        return res.json({ success: true, watchlist: [] });
+    }
+    
+    res.json({
+        success: true,
+        watchlist: req.user.watchlist
+    });
+});
+
+// Update preferences
+app.put('/api/user/preferences', authenticateToken, async (req, res) => {
+    if (!req.user) {
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
+    }
+    
+    try {
+        const { preferences } = req.body;
+        
+        if (preferences) {
+            req.user.preferences = { ...req.user.preferences, ...preferences };
+            await req.user.save();
+        }
+        
+        res.json({ success: true, preferences: req.user.preferences });
+    } catch (error) {
+        console.error('Preferences error:', error);
+        res.status(500).json({ success: false, message: 'Failed to update preferences' });
+    }
+});
+
+// ====================
+// CONTENT ENDPOINTS
+// ====================
+
+// Featured content (curated)
+app.get('/api/featured/:category', async (req, res) => {
+    try {
+        const { category } = req.params;
+        const { limit = 20 } = req.query;
+        
+        const featured = FEATURED_CONTENT.find(f => f.id === category);
+        if (!featured) {
+            return res.status(404).json({ success: false, message: 'Category not found' });
+        }
+        
+        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(featured.query)}`);
         const data = await response.json();
         
         if (data.results && data.results.items) {
-            const items = data.results.items.map(item => ({
+            const items = data.results.items.slice(0, limit).map(item => ({
                 id: item.subjectId,
                 title: item.title,
                 description: item.description,
@@ -42,6 +373,7 @@ app.get('/api/search/:query', async (req, res) => {
                 type: item.subjectType === 1 ? 'movie' : 'tv',
                 cover: item.cover?.url || item.thumbnail,
                 poster: item.cover?.url || item.thumbnail,
+                backdrop: item.stills?.url || item.cover?.url,
                 genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
                 duration: item.duration,
                 rating: item.imdbRatingValue,
@@ -51,6 +383,117 @@ app.get('/api/search/:query', async (req, res) => {
             
             res.json({
                 success: true,
+                category: featured.title,
+                results: items
+            });
+        } else {
+            res.json({ success: true, category: featured.title, results: [] });
+        }
+    } catch (error) {
+        console.error('Featured error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch featured content' });
+    }
+});
+
+// Get all featured categories
+app.get('/api/featured', async (req, res) => {
+    try {
+        const categories = await Promise.all(
+            FEATURED_CONTENT.map(async (featured) => {
+                try {
+                    const response = await fetch(`${API_BASE}/search/${encodeURIComponent(featured.query)}`);
+                    const data = await response.json();
+                    
+                    if (data.results && data.results.items) {
+                        const items = data.results.items.slice(0, 10).map(item => ({
+                            id: item.subjectId,
+                            title: item.title,
+                            type: item.subjectType === 1 ? 'movie' : 'tv',
+                            cover: item.cover?.url || item.thumbnail,
+                            rating: item.imdbRatingValue
+                        }));
+                        
+                        return {
+                            id: featured.id,
+                            title: featured.title,
+                            query: featured.query,
+                            items: items
+                        };
+                    }
+                } catch (err) {
+                    console.error(`Error fetching ${featured.title}:`, err);
+                }
+                return {
+                    id: featured.id,
+                    title: featured.title,
+                    query: featured.query,
+                    items: []
+                };
+            })
+        );
+        
+        res.json({
+            success: true,
+            categories: categories.filter(cat => cat.items.length > 0)
+        });
+    } catch (error) {
+        console.error('Featured categories error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch featured categories' });
+    }
+});
+
+// Search endpoint (enhanced)
+app.get('/api/search/:query', async (req, res) => {
+    try {
+        const { query } = req.params;
+        const { page = '1', type, year, genre } = req.query;
+        
+        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(query)}`);
+        const data = await response.json();
+        
+        if (data.results && data.results.items) {
+            let items = data.results.items.map(item => ({
+                id: item.subjectId,
+                title: item.title,
+                description: item.description,
+                year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
+                type: item.subjectType === 1 ? 'movie' : 'tv',
+                cover: item.cover?.url || item.thumbnail,
+                poster: item.cover?.url || item.thumbnail,
+                backdrop: item.stills?.url || item.cover?.url,
+                genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
+                duration: item.duration,
+                rating: item.imdbRatingValue,
+                releaseDate: item.releaseDate,
+                country: item.countryName,
+                hasResource: item.hasResource
+            }));
+            
+            // Apply filters
+            if (type) {
+                const targetType = type === 'movie' ? 1 : 2;
+                items = items.filter(item => 
+                    (type === 'movie' && item.type === 'movie') || 
+                    (type === 'tv' && item.type === 'tv')
+                );
+            }
+            
+            if (year) {
+                items = items.filter(item => item.year === year.toString());
+            }
+            
+            if (genre) {
+                items = items.filter(item => 
+                    item.genre && item.genre.some(g => 
+                        g.toLowerCase().includes(genre.toLowerCase())
+                    )
+                );
+            }
+            
+            res.json({
+                success: true,
+                query: query,
+                filters: { type, year, genre },
                 results: items,
                 pagination: data.results.pager || {
                     page: parseInt(page),
@@ -59,7 +502,11 @@ app.get('/api/search/:query', async (req, res) => {
                 }
             });
         } else {
-            res.json({ success: true, results: [], pagination: { page: 1, totalPages: 1, hasMore: false } });
+            res.json({ 
+                success: true, 
+                results: [], 
+                pagination: { page: 1, totalPages: 1, hasMore: false } 
+            });
         }
     } catch (error) {
         console.error('Search error:', error);
@@ -67,24 +514,39 @@ app.get('/api/search/:query', async (req, res) => {
     }
 });
 
-// Get trending content with caching
+// Get trending content (improved)
 app.get('/api/trending', async (req, res) => {
     try {
-        // Check cache
         const now = Date.now();
         if (trendingCache.data && (now - trendingCache.timestamp) < CACHE_DURATION) {
             return res.json(trendingCache.data);
         }
         
-        // Popular searches to get trending content
-        const searches = ['movie', 'avengers', 'spider man', 'stranger things', 'fast and furious'];
-        const randomSearch = searches[Math.floor(Math.random() * searches.length)];
+        // Better trending algorithm
+        const trendingQueries = [
+            '2024', 'new', 'latest', 'movie', 
+            'series', 'action', 'comedy', 'drama'
+        ];
         
-        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(randomSearch)}`);
+        // Get current day of month for rotation
+        const dayOfMonth = new Date().getDate();
+        const queryIndex = dayOfMonth % trendingQueries.length;
+        const trendingQuery = trendingQueries[queryIndex];
+        
+        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(trendingQuery)}`);
         const data = await response.json();
         
         if (data.results && data.results.items) {
-            const items = data.results.items.slice(0, 20).map(item => ({
+            // Sort by rating if available
+            const sortedItems = data.results.items
+                .filter(item => item.imdbRatingValue)
+                .sort((a, b) => parseFloat(b.imdbRatingValue) - parseFloat(a.imdbRatingValue))
+                .slice(0, 20);
+            
+            // Fallback to first 20 items if no ratings
+            const items = sortedItems.length > 0 ? sortedItems : data.results.items.slice(0, 20);
+            
+            const processedItems = items.map(item => ({
                 id: item.subjectId,
                 title: item.title,
                 description: item.description,
@@ -92,21 +554,23 @@ app.get('/api/trending', async (req, res) => {
                 type: item.subjectType === 1 ? 'movie' : 'tv',
                 cover: item.cover?.url || item.thumbnail,
                 poster: item.cover?.url || item.thumbnail,
+                backdrop: item.stills?.url || item.cover?.url,
                 genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
                 duration: item.duration,
                 rating: item.imdbRatingValue,
-                releaseDate: item.releaseDate
+                releaseDate: item.releaseDate,
+                country: item.countryName,
+                trendingScore: parseFloat(item.imdbRatingValue) || 0
             }));
             
             const result = {
                 success: true,
-                results: items,
+                query: trendingQuery,
+                results: processedItems,
                 timestamp: now
             };
             
-            // Update cache
             trendingCache = { data: result, timestamp: now };
-            
             res.json(result);
         } else {
             res.json({ success: true, results: [] });
@@ -117,7 +581,7 @@ app.get('/api/trending', async (req, res) => {
     }
 });
 
-// Info endpoint
+// Info endpoint (unchanged but optimized)
 app.get('/api/info/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -130,7 +594,6 @@ app.get('/api/info/:id', async (req, res) => {
             const stars = data.results.stars || [];
             const resource = data.results.resource || {};
             
-            // Extract episodes if it's a TV series
             let episodes = [];
             let seasonsData = [];
             if (resource.seasons && Array.isArray(resource.seasons)) {
@@ -139,13 +602,18 @@ app.get('/api/info/:id', async (req, res) => {
                         const maxEp = season.maxEp || season.resolutions[0]?.epNum || 1;
                         seasonsData.push({
                             season: season.se,
-                            episodeCount: maxEp
+                            episodeCount: maxEp,
+                            availableQualities: season.resolutions.map(r => ({
+                                quality: r.resolution + 'p',
+                                episodes: r.epNum
+                            }))
                         });
+                        
                         for (let i = 1; i <= maxEp; i++) {
                             episodes.push({
                                 season: season.se,
                                 episode: i,
-                                resolutions: season.resolutions.map(r => r.resolution)
+                                available: season.resolutions.some(r => r.epNum >= i)
                             });
                         }
                     }
@@ -161,6 +629,7 @@ app.get('/api/info/:id', async (req, res) => {
                     type: subject.subjectType === 1 ? 'movie' : 'tv',
                     cover: subject.cover?.url || subject.thumbnail,
                     poster: subject.cover?.url || subject.thumbnail,
+                    backdrop: subject.stills?.url || subject.cover?.url,
                     trailer: subject.trailer?.videoAddress?.url,
                     genre: subject.genre ? subject.genre.split(',').map(g => g.trim()) : [],
                     releaseDate: subject.releaseDate,
@@ -187,7 +656,7 @@ app.get('/api/info/:id', async (req, res) => {
     }
 });
 
-// Sources endpoint
+// Sources endpoint (unchanged)
 app.get('/api/sources/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -220,60 +689,12 @@ app.get('/api/sources/:id', async (req, res) => {
     }
 });
 
-// Batch sources endpoint for multiple episodes
-app.get('/api/batch-sources/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { episodes } = req.query; // Format: "s1e1,s1e2,s2e1"
-        
-        if (!episodes) {
-            return res.status(400).json({ success: false, error: 'No episodes specified' });
-        }
-        
-        const episodeList = episodes.split(',');
-        const sourcesPromises = episodeList.map(async ep => {
-            const [season, episode] = ep.replace('s', '').replace('e', '').split('e');
-            const apiUrl = `${API_BASE}/sources/${id}?season=${season}&episode=${episode}`;
-            
-            try {
-                const response = await fetch(apiUrl);
-                const data = await response.json();
-                
-                if (data.results && Array.isArray(data.results)) {
-                    return {
-                        season,
-                        episode,
-                        sources: data.results.map(source => ({
-                            quality: source.quality,
-                            download_url: source.download_url,
-                            size: source.size
-                        }))
-                    };
-                }
-            } catch (error) {
-                console.error(`Error fetching sources for ${ep}:`, error);
-            }
-            return null;
-        });
-        
-        const results = await Promise.all(sourcesPromises);
-        res.json({
-            success: true,
-            results: results.filter(r => r !== null)
-        });
-    } catch (error) {
-        console.error('Batch sources error:', error);
-        res.status(500).json({ success: false, error: 'Failed to fetch batch sources' });
-    }
-});
-
-// Stream endpoint
+// Stream endpoint (enhanced with quality fallback)
 app.get('/api/stream/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const { season, episode, quality = '720p' } = req.query;
         
-        // First get sources
         let sourcesUrl = `${API_BASE}/sources/${id}`;
         if (season) sourcesUrl += `?season=${season}`;
         if (episode) sourcesUrl += `${season ? '&' : '?'}episode=${episode}`;
@@ -285,22 +706,83 @@ app.get('/api/stream/:id', async (req, res) => {
             return res.status(404).json({ error: 'No sources available' });
         }
         
-        // Find the requested quality
-        const source = sourcesData.results.find(s => s.quality === quality);
-        if (!source) {
-            // Fallback to first available quality
-            const fallbackSource = sourcesData.results[0];
-            res.redirect(fallbackSource.download_url);
-        } else {
-            res.redirect(source.download_url);
+        // Quality priority: requested → 720p → 480p → 360p → first available
+        const qualityOrder = [quality, '720p', '480p', '360p'];
+        let selectedSource = null;
+        
+        for (const q of qualityOrder) {
+            const source = sourcesData.results.find(s => s.quality === q);
+            if (source) {
+                selectedSource = source;
+                break;
+            }
         }
+        
+        if (!selectedSource) {
+            selectedSource = sourcesData.results[0];
+        }
+        
+        res.redirect(selectedSource.download_url);
     } catch (error) {
         console.error('Stream error:', error);
         res.status(500).json({ error: 'Streaming failed' });
     }
 });
 
-// Main HTML page
+// Get recommendations (based on watch history)
+app.get('/api/recommendations', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user || req.user.watchHistory.length === 0) {
+            // Return popular content as fallback
+            const response = await fetch(`${API_BASE}/search/movie`);
+            const data = await response.json();
+            
+            if (data.results && data.results.items) {
+                const items = data.results.items.slice(0, 10).map(item => ({
+                    id: item.subjectId,
+                    title: item.title,
+                    type: item.subjectType === 1 ? 'movie' : 'tv',
+                    cover: item.cover?.url || item.thumbnail,
+                    rating: item.imdbRatingValue
+                }));
+                
+                return res.json({ success: true, recommendations: items, source: 'popular' });
+            }
+        }
+        
+        // Get most watched genre
+        const genreCount = {};
+        req.user.watchHistory.forEach(item => {
+            // We'd need genre info from content, for now use popular
+        });
+        
+        // For now, return trending
+        const trendingResponse = await fetch(`${API_BASE}/search/2024`);
+        const trendingData = await trendingResponse.json();
+        
+        if (trendingData.results && trendingData.results.items) {
+            const items = trendingData.results.items.slice(0, 10).map(item => ({
+                id: item.subjectId,
+                title: item.title,
+                type: item.subjectType === 1 ? 'movie' : 'tv',
+                cover: item.cover?.url || item.thumbnail,
+                rating: item.imdbRatingValue
+            }));
+            
+            res.json({ success: true, recommendations: items, source: 'trending' });
+        } else {
+            res.json({ success: true, recommendations: [] });
+        }
+    } catch (error) {
+        console.error('Recommendations error:', error);
+        res.json({ success: true, recommendations: [] });
+    }
+});
+
+// ====================
+// MAIN HTML PAGE
+// ====================
+
 app.get('/', (req, res) => {
     res.send(`
     <!DOCTYPE html>
@@ -308,9 +790,9 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>CLOUD.MOVIES | Premium Streaming</title>
-        <meta name="description" content="Premium movie and series streaming platform">
-        <meta name="author" content="Bruce Bera - Bera Tech">
+        <title>STREAMFLIX | Premium Entertainment</title>
+        <meta name="description" content="Stream movies and TV series in stunning quality">
+        <meta name="author" content="Bruce Bera">
         
         <!-- PWA Manifest -->
         <link rel="manifest" href="/manifest.json">
@@ -328,21 +810,27 @@ app.get('/', (req, res) => {
         <!-- Styles -->
         <style>
             :root {
-                --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                --secondary-gradient: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                --accent-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-                --dark-bg: #0a0a1a;
-                --darker-bg: #050511;
-                --card-bg: rgba(255, 255, 255, 0.05);
-                --glass-bg: rgba(255, 255, 255, 0.08);
-                --text-primary: #ffffff;
-                --text-secondary: #b8c1ec;
+                /* Enhanced Color Scheme */
+                --primary-bg: #0a0a1a;
+                --secondary-bg: #0f0f23;
+                --card-bg: #141430;
+                --accent-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                --accent-red: #e50914;
                 --accent-blue: #667eea;
                 --accent-purple: #764ba2;
                 --accent-pink: #f093fb;
+                --accent-cyan: #00f2fe;
+                
+                /* Text Colors */
+                --text-primary: #ffffff;
+                --text-secondary: #b8c1ec;
+                --text-muted: #8a8d9e;
+                
+                /* Status Colors */
                 --success: #00ff9d;
                 --warning: #ffcc00;
                 --danger: #ff416c;
+                --info: #4facfe;
             }
             
             * {
@@ -353,24 +841,20 @@ app.get('/', (req, res) => {
             
             body {
                 font-family: 'Poppins', sans-serif;
-                background: var(--dark-bg);
+                background: var(--primary-bg);
                 color: var(--text-primary);
                 min-height: 100vh;
                 overflow-x: hidden;
-                background-image: 
-                    radial-gradient(circle at 20% 80%, rgba(102, 126, 234, 0.15) 0%, transparent 50%),
-                    radial-gradient(circle at 80% 20%, rgba(118, 75, 162, 0.15) 0%, transparent 50%),
-                    radial-gradient(circle at 40% 40%, rgba(240, 147, 251, 0.1) 0%, transparent 50%);
             }
             
-            /* Loading Animation */
+            /* Loading Screen - Enhanced */
             #loading-screen {
                 position: fixed;
                 top: 0;
                 left: 0;
                 width: 100%;
                 height: 100%;
-                background: var(--darker-bg);
+                background: var(--primary-bg);
                 display: flex;
                 flex-direction: column;
                 justify-content: center;
@@ -380,8 +864,8 @@ app.get('/', (req, res) => {
             }
             
             .logo-container {
-                position: relative;
-                margin-bottom: 2rem;
+                text-align: center;
+                margin-bottom: 3rem;
             }
             
             .logo-text {
@@ -390,60 +874,37 @@ app.get('/', (req, res) => {
                 font-weight: 900;
                 text-transform: uppercase;
                 letter-spacing: 4px;
-                background: linear-gradient(45deg, var(--accent-blue), var(--accent-pink), var(--accent-purple));
+                background: var(--accent-gradient);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
-                background-clip: text;
                 background-size: 300% 300%;
                 animation: gradientShift 3s ease infinite;
-                position: relative;
+                margin-bottom: 0.5rem;
             }
             
-            .logo-text::after {
-                content: 'PREMIUM STREAMING';
-                position: absolute;
-                top: 100%;
-                left: 50%;
-                transform: translateX(-50%);
-                font-size: 1rem;
-                font-weight: 400;
+            .logo-tagline {
+                font-size: 1.2rem;
+                color: var(--text-secondary);
                 letter-spacing: 2px;
-                color: var(--text-secondary);
-                margin-top: 10px;
-                opacity: 0.8;
+                font-weight: 300;
             }
             
-            .loading-ring {
-                width: 80px;
-                height: 80px;
-                border-radius: 50%;
-                border: 4px solid transparent;
-                border-top: 4px solid var(--accent-blue);
-                border-right: 4px solid var(--accent-pink);
-                animation: spin 1s linear infinite;
-                position: relative;
-            }
-            
-            .loading-ring::after {
-                content: '';
-                position: absolute;
-                top: -4px;
-                left: -4px;
-                right: -4px;
-                bottom: -4px;
-                border-radius: 50%;
-                border: 4px solid transparent;
-                border-top: 4px solid var(--accent-purple);
-                animation: spin 1.5s linear infinite reverse;
-            }
-            
-            .loading-text {
+            .loading-animation {
+                display: flex;
+                gap: 10px;
                 margin-top: 2rem;
-                font-size: 1.1rem;
-                color: var(--text-secondary);
-                font-family: 'Montserrat', sans-serif;
-                letter-spacing: 1px;
             }
+            
+            .loading-dot {
+                width: 15px;
+                height: 15px;
+                border-radius: 50%;
+                background: var(--accent-gradient);
+                animation: bounce 1.4s infinite ease-in-out both;
+            }
+            
+            .loading-dot:nth-child(1) { animation-delay: -0.32s; }
+            .loading-dot:nth-child(2) { animation-delay: -0.16s; }
             
             @keyframes gradientShift {
                 0% { background-position: 0% 50%; }
@@ -451,326 +912,287 @@ app.get('/', (req, res) => {
                 100% { background-position: 0% 50%; }
             }
             
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
+            @keyframes bounce {
+                0%, 80%, 100% { transform: scale(0); }
+                40% { transform: scale(1); }
             }
             
-            @keyframes float {
-                0%, 100% { transform: translateY(0); }
-                50% { transform: translateY(-10px); }
-            }
-            
-            /* Header */
+            /* Header - Enhanced */
             header {
-                background: var(--glass-bg);
-                backdrop-filter: blur(20px);
-                padding: 1rem 2rem;
-                position: sticky;
+                background: linear-gradient(to bottom, rgba(10, 10, 26, 0.95), transparent);
+                padding: 1.5rem 3rem;
+                position: fixed;
                 top: 0;
+                width: 100%;
                 z-index: 100;
-                border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+                transition: all 0.3s ease;
             }
             
-            .header-content {
+            header.scrolled {
+                background: rgba(10, 10, 26, 0.95);
+                backdrop-filter: blur(10px);
+                box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+            }
+            
+            .header-container {
                 max-width: 1400px;
                 margin: 0 auto;
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
-                gap: 2rem;
             }
             
-            .site-logo {
+            .logo {
                 font-family: 'Orbitron', sans-serif;
-                font-size: 1.8rem;
+                font-size: 2rem;
                 font-weight: 700;
-                background: linear-gradient(45deg, var(--accent-blue), var(--accent-pink));
+                background: var(--accent-gradient);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
                 text-decoration: none;
                 display: flex;
                 align-items: center;
                 gap: 12px;
-                letter-spacing: 1px;
-                transition: all 0.3s ease;
             }
             
-            .site-logo:hover {
-                transform: scale(1.05);
-                filter: drop-shadow(0 0 10px rgba(102, 126, 234, 0.5));
+            .nav-links {
+                display: flex;
+                gap: 2rem;
+                align-items: center;
             }
             
-            .logo-icon {
-                font-size: 2rem;
-                animation: float 3s ease-in-out infinite;
-            }
-            
-            .search-container {
-                flex: 1;
-                max-width: 600px;
-                position: relative;
-            }
-            
-            #search-input {
-                width: 100%;
-                padding: 14px 50px 14px 25px;
-                background: rgba(255, 255, 255, 0.1);
-                border: 2px solid transparent;
-                border-radius: 50px;
-                color: white;
+            .nav-link {
+                color: var(--text-secondary);
+                text-decoration: none;
+                font-weight: 500;
+                transition: color 0.3s ease;
                 font-size: 1rem;
-                font-family: 'Poppins', sans-serif;
-                outline: none;
-                transition: all 0.3s ease;
-                backdrop-filter: blur(10px);
             }
             
-            #search-input:focus {
-                background: rgba(255, 255, 255, 0.15);
-                border-color: var(--accent-blue);
-                box-shadow: 0 0 30px rgba(102, 126, 234, 0.3);
-                transform: translateY(-2px);
+            .nav-link:hover, .nav-link.active {
+                color: var(--text-primary);
             }
             
-            .search-btn {
-                position: absolute;
-                right: 10px;
-                top: 50%;
-                transform: translateY(-50%);
-                background: var(--primary-gradient);
-                border: none;
-                border-radius: 50%;
-                width: 45px;
-                height: 45px;
-                color: white;
-                cursor: pointer;
-                transition: all 0.3s ease;
+            .user-menu {
                 display: flex;
                 align-items: center;
-                justify-content: center;
-                font-size: 1.2rem;
+                gap: 1rem;
             }
             
-            .search-btn:hover {
-                transform: translateY(-50%) scale(1.1) rotate(10deg);
-                box-shadow: 0 5px 20px rgba(102, 126, 234, 0.5);
-            }
-            
-            /* Main Content */
-            main {
-                max-width: 1400px;
-                margin: 0 auto;
-                padding: 2rem;
-            }
-            
-            .hero-section {
-                text-align: center;
-                padding: 5rem 2rem;
-                background: rgba(255, 255, 255, 0.03);
+            .auth-btn {
+                padding: 8px 20px;
                 border-radius: 25px;
-                margin-bottom: 3rem;
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                border: none;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            
+            .login-btn {
+                background: transparent;
+                color: var(--text-primary);
+                border: 2px solid var(--accent-blue);
+            }
+            
+            .signup-btn {
+                background: var(--accent-gradient);
+                color: white;
+            }
+            
+            .auth-btn:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+            }
+            
+            /* Hero Section */
+            .hero {
+                height: 80vh;
+                min-height: 600px;
                 position: relative;
                 overflow: hidden;
-                backdrop-filter: blur(10px);
+                margin-bottom: 4rem;
             }
             
-            .hero-section::before {
-                content: '';
+            .hero-backdrop {
                 position: absolute;
-                top: -50%;
-                left: -50%;
-                width: 200%;
-                height: 200%;
-                background: radial-gradient(circle, rgba(102, 126, 234, 0.1) 0%, transparent 70%);
-                animation: pulse 15s infinite linear;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
                 z-index: -1;
+                opacity: 0.3;
+            }
+            
+            .hero-content {
+                position: relative;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                padding: 0 4rem;
+                background: linear-gradient(to right, var(--primary-bg) 20%, transparent 70%);
+            }
+            
+            .hero-info {
+                max-width: 600px;
             }
             
             .hero-title {
                 font-family: 'Montserrat', sans-serif;
                 font-size: 4rem;
-                margin-bottom: 1rem;
-                background: linear-gradient(45deg, #fff, var(--accent-blue), var(--accent-pink));
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                background-size: 300% 300%;
-                animation: gradientShift 3s ease infinite;
                 font-weight: 800;
-                letter-spacing: 2px;
+                margin-bottom: 1.5rem;
+                line-height: 1.1;
             }
             
-            .hero-subtitle {
-                font-size: 1.3rem;
+            .hero-description {
+                font-size: 1.2rem;
+                line-height: 1.6;
                 color: var(--text-secondary);
                 margin-bottom: 2rem;
-                font-weight: 300;
-                letter-spacing: 1px;
             }
             
-            /* Featured Tags */
-            .featured-tags {
+            .hero-actions {
                 display: flex;
-                justify-content: center;
                 gap: 1rem;
-                flex-wrap: wrap;
-                margin-top: 2rem;
+                margin-bottom: 2rem;
             }
             
-            .featured-tag {
-                padding: 8px 20px;
-                background: rgba(255, 255, 255, 0.1);
-                border-radius: 25px;
-                font-size: 0.9rem;
+            .hero-btn {
+                padding: 15px 35px;
+                border: none;
+                border-radius: 5px;
+                font-size: 1.1rem;
+                font-weight: 600;
                 cursor: pointer;
-                transition: all 0.3s ease;
-                border: 1px solid transparent;
-                backdrop-filter: blur(10px);
-            }
-            
-            .featured-tag:hover {
-                background: var(--primary-gradient);
-                transform: translateY(-3px);
-                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-            }
-            
-            /* Genre Navigation */
-            .genre-nav {
                 display: flex;
-                gap: 1rem;
-                margin-bottom: 3rem;
-                overflow-x: auto;
-                padding: 1.5rem;
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 20px;
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                align-items: center;
+                gap: 10px;
+                transition: all 0.3s ease;
+            }
+            
+            .play-btn {
+                background: var(--accent-red);
+                color: white;
+            }
+            
+            .info-btn {
+                background: rgba(255, 255, 255, 0.2);
                 backdrop-filter: blur(10px);
+                color: white;
+            }
+            
+            .hero-btn:hover {
+                transform: scale(1.05);
+                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+            }
+            
+            /* Content Rows */
+            .content-section {
+                padding: 2rem 4rem;
+                max-width: 1400px;
+                margin: 0 auto;
+            }
+            
+            .section-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 1.5rem;
+            }
+            
+            .section-title {
+                font-size: 1.8rem;
+                font-weight: 600;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            
+            .section-link {
+                color: var(--accent-blue);
+                text-decoration: none;
+                font-weight: 500;
+                display: flex;
+                align-items: center;
+                gap: 5px;
+            }
+            
+            .content-row {
+                display: flex;
+                overflow-x: auto;
+                gap: 1rem;
+                padding: 1rem 0;
                 scrollbar-width: thin;
                 scrollbar-color: var(--accent-blue) transparent;
             }
             
-            .genre-nav::-webkit-scrollbar {
+            .content-row::-webkit-scrollbar {
                 height: 6px;
             }
             
-            .genre-nav::-webkit-scrollbar-track {
+            .content-row::-webkit-scrollbar-track {
                 background: rgba(255, 255, 255, 0.05);
                 border-radius: 3px;
             }
             
-            .genre-nav::-webkit-scrollbar-thumb {
-                background: var(--primary-gradient);
+            .content-row::-webkit-scrollbar-thumb {
+                background: var(--accent-gradient);
                 border-radius: 3px;
             }
             
-            .genre-btn {
-                padding: 12px 28px;
-                background: rgba(255, 255, 255, 0.08);
-                border: 2px solid transparent;
-                border-radius: 50px;
-                color: var(--text-primary);
-                cursor: pointer;
-                white-space: nowrap;
-                transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-                font-family: 'Poppins', sans-serif;
-                font-weight: 500;
-                letter-spacing: 0.5px;
-                backdrop-filter: blur(10px);
-                position: relative;
-                overflow: hidden;
-            }
-            
-            .genre-btn::before {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: -100%;
-                width: 100%;
-                height: 100%;
-                background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-                transition: left 0.5s ease;
-            }
-            
-            .genre-btn:hover::before {
-                left: 100%;
-            }
-            
-            .genre-btn:hover, .genre-btn.active {
-                background: var(--primary-gradient);
-                border-color: var(--accent-blue);
-                transform: translateY(-5px) scale(1.05);
-                box-shadow: 0 15px 30px rgba(102, 126, 234, 0.4);
-            }
-            
-            /* Content Grid */
-            .content-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-                gap: 2rem;
-                margin-bottom: 3rem;
-            }
-            
+            /* Content Card - Enhanced */
             .content-card {
+                flex: 0 0 auto;
+                width: 220px;
                 background: var(--card-bg);
-                border-radius: 20px;
+                border-radius: 10px;
                 overflow: hidden;
-                transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-                border: 1px solid rgba(255, 255, 255, 0.1);
+                transition: all 0.3s ease;
                 cursor: pointer;
                 position: relative;
-                backdrop-filter: blur(10px);
             }
             
             .content-card:hover {
-                transform: translateY(-15px) scale(1.03);
-                border-color: var(--accent-blue);
-                box-shadow: 0 25px 50px rgba(102, 126, 234, 0.3);
+                transform: scale(1.05);
+                z-index: 10;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
             }
             
-            .content-card::before {
-                content: '';
+            .card-image {
+                width: 100%;
+                height: 320px;
+                object-fit: cover;
+                transition: transform 0.3s ease;
+            }
+            
+            .content-card:hover .card-image {
+                transform: scale(1.1);
+            }
+            
+            .card-overlay {
                 position: absolute;
                 top: 0;
                 left: 0;
                 right: 0;
-                height: 4px;
-                background: var(--primary-gradient);
-                transform: scaleX(0);
-                transform-origin: left;
-                transition: transform 0.4s ease;
-            }
-            
-            .content-card:hover::before {
-                transform: scaleX(1);
-            }
-            
-            .card-poster {
-                width: 100%;
-                height: 320px;
-                object-fit: cover;
-                display: block;
-                transition: transform 0.5s ease;
-            }
-            
-            .content-card:hover .card-poster {
-                transform: scale(1.1);
-            }
-            
-            .card-info {
+                bottom: 0;
+                background: linear-gradient(to top, rgba(0, 0, 0, 0.9), transparent 50%);
+                opacity: 0;
+                transition: opacity 0.3s ease;
+                display: flex;
+                flex-direction: column;
+                justify-content: flex-end;
                 padding: 1.5rem;
-                position: relative;
+            }
+            
+            .content-card:hover .card-overlay {
+                opacity: 1;
             }
             
             .card-title {
-                font-size: 1.2rem;
-                margin-bottom: 0.8rem;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
+                font-size: 1.1rem;
                 font-weight: 600;
-                letter-spacing: 0.5px;
+                margin-bottom: 0.5rem;
             }
             
             .card-meta {
@@ -778,630 +1200,231 @@ app.get('/', (req, res) => {
                 justify-content: space-between;
                 font-size: 0.9rem;
                 color: var(--text-secondary);
-                margin-bottom: 0.5rem;
+                margin-bottom: 1rem;
             }
             
-            .card-genres {
+            .card-actions {
                 display: flex;
-                flex-wrap: wrap;
                 gap: 0.5rem;
-                margin-top: 0.8rem;
             }
             
-            .genre-tag {
-                padding: 3px 10px;
-                background: rgba(102, 126, 234, 0.15);
-                border-radius: 15px;
-                font-size: 0.75rem;
-                color: var(--accent-blue);
-                border: 1px solid rgba(102, 126, 234, 0.3);
-            }
-            
-            .rating-badge {
-                position: absolute;
-                top: -15px;
-                right: 15px;
-                background: var(--primary-gradient);
+            .card-btn {
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                border: none;
+                background: rgba(255, 255, 255, 0.2);
+                backdrop-filter: blur(10px);
                 color: white;
-                padding: 5px 12px;
-                border-radius: 15px;
-                font-weight: 600;
-                font-size: 0.9rem;
-                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+                cursor: pointer;
                 display: flex;
                 align-items: center;
-                gap: 5px;
+                justify-content: center;
+                transition: all 0.3s ease;
             }
             
-            /* Modal Styles */
-            .modal {
+            .card-btn:hover {
+                background: var(--accent-red);
+                transform: scale(1.1);
+            }
+            
+            /* Auth Modal */
+            .auth-modal {
                 display: none;
                 position: fixed;
                 top: 0;
                 left: 0;
                 width: 100%;
                 height: 100%;
-                background: rgba(0, 0, 0, 0.95);
+                background: rgba(0, 0, 0, 0.8);
                 z-index: 1000;
-                overflow-y: auto;
-                backdrop-filter: blur(10px);
+                backdrop-filter: blur(5px);
             }
             
-            .modal-content {
-                max-width: 1200px;
-                margin: 2rem auto;
-                background: rgba(10, 10, 26, 0.95);
-                border-radius: 25px;
-                overflow: hidden;
-                border: 1px solid rgba(255, 255, 255, 0.15);
-                box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
-                backdrop-filter: blur(20px);
-                animation: modalSlideIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            }
-            
-            @keyframes modalSlideIn {
-                from {
-                    opacity: 0;
-                    transform: translateY(-50px) scale(0.9);
-                }
-                to {
-                    opacity: 1;
-                    transform: translateY(0) scale(1);
-                }
-            }
-            
-            .modal-header {
-                padding: 2rem;
-                background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                position: relative;
-                overflow: hidden;
-            }
-            
-            .modal-header::before {
-                content: '';
+            .auth-content {
                 position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M0,0 L100,0 L100,100" fill="rgba(255,255,255,0.1)"/></svg>');
-                opacity: 0.3;
-            }
-            
-            .close-modal {
-                background: rgba(0, 0, 0, 0.3);
-                border: 2px solid white;
-                border-radius: 50%;
-                width: 40px;
-                height: 40px;
-                color: white;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1.5rem;
-                backdrop-filter: blur(10px);
-            }
-            
-            .close-modal:hover {
-                background: white;
-                color: var(--dark-bg);
-                transform: rotate(90deg);
-            }
-            
-            .modal-body {
-                padding: 2.5rem;
-            }
-            
-            /* Player */
-            .video-container {
-                width: 100%;
-                margin: 0 auto 3rem;
-                background: #000;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: var(--secondary-bg);
                 border-radius: 15px;
-                overflow: hidden;
-                position: relative;
-                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+                padding: 3rem;
+                width: 90%;
+                max-width: 400px;
+                box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
             }
             
-            #video-player {
-                width: 100%;
-                height: 500px;
-                background: #000;
-            }
-            
-            /* Episode Selection */
-            .episode-section {
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 20px;
-                padding: 2rem;
-                margin: 2rem 0;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            .season-selector {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-                gap: 1rem;
+            .auth-tabs {
+                display: flex;
                 margin-bottom: 2rem;
+                border-bottom: 2px solid rgba(255, 255, 255, 0.1);
             }
             
-            .season-card {
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 15px;
-                padding: 1.5rem;
-                text-align: center;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                border: 2px solid transparent;
-            }
-            
-            .season-card:hover, .season-card.active {
-                background: var(--primary-gradient);
-                transform: translateY(-5px);
-                border-color: var(--accent-blue);
-                box-shadow: 0 15px 30px rgba(102, 126, 234, 0.3);
-            }
-            
-            .episode-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-                gap: 1rem;
-                margin-top: 1.5rem;
-            }
-            
-            .episode-checkbox {
-                display: none;
-            }
-            
-            .episode-label {
-                background: rgba(255, 255, 255, 0.08);
-                border-radius: 10px;
-                padding: 1rem;
-                text-align: center;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                border: 2px solid transparent;
-                display: block;
-            }
-            
-            .episode-checkbox:checked + .episode-label {
-                background: var(--primary-gradient);
-                border-color: var(--accent-blue);
-                transform: scale(1.05);
-                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-            }
-            
-            .episode-label:hover {
-                background: rgba(102, 126, 234, 0.2);
-                transform: translateY(-3px);
-            }
-            
-            .batch-actions {
-                display: flex;
-                gap: 1rem;
-                margin-top: 2rem;
-                flex-wrap: wrap;
-            }
-            
-            .batch-btn {
-                padding: 12px 24px;
-                border: none;
-                border-radius: 10px;
-                font-weight: 600;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                font-family: 'Poppins', sans-serif;
-            }
-            
-            .batch-play {
-                background: var(--primary-gradient);
-                color: white;
-            }
-            
-            .batch-download {
-                background: var(--secondary-gradient);
-                color: white;
-            }
-            
-            .batch-btn:hover {
-                transform: translateY(-3px);
-                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
-            }
-            
-            /* Quality Selector */
-            .quality-selector {
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 15px;
-                padding: 1.5rem;
-                margin: 2rem 0;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            .quality-grid {
-                display: flex;
-                gap: 1rem;
-                flex-wrap: wrap;
-                margin-top: 1rem;
-            }
-            
-            .quality-card {
+            .auth-tab {
                 flex: 1;
-                min-width: 120px;
-                background: rgba(255, 255, 255, 0.08);
-                border-radius: 10px;
                 padding: 1rem;
                 text-align: center;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                border: 2px solid transparent;
-            }
-            
-            .quality-card:hover, .quality-card.active {
-                background: var(--primary-gradient);
-                transform: translateY(-5px);
-                border-color: var(--accent-blue);
-            }
-            
-            /* Action Buttons */
-            .action-buttons {
-                display: flex;
-                gap: 1.5rem;
-                margin-top: 3rem;
-                flex-wrap: wrap;
-            }
-            
-            .action-btn {
-                padding: 16px 32px;
+                background: none;
                 border: none;
-                border-radius: 15px;
+                color: var(--text-secondary);
                 font-size: 1.1rem;
                 font-weight: 600;
                 cursor: pointer;
-                transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+                transition: color 0.3s ease;
+            }
+            
+            .auth-tab.active {
+                color: var(--text-primary);
+                border-bottom: 3px solid var(--accent-blue);
+            }
+            
+            .auth-form {
                 display: flex;
-                align-items: center;
-                gap: 12px;
-                font-family: 'Poppins', sans-serif;
-                min-width: 200px;
-                justify-content: center;
-                position: relative;
-                overflow: hidden;
-            }
-            
-            .action-btn::before {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: -100%;
-                width: 100%;
-                height: 100%;
-                background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-                transition: left 0.5s ease;
-            }
-            
-            .action-btn:hover::before {
-                left: 100%;
-            }
-            
-            .stream-btn {
-                background: var(--primary-gradient);
-                color: white;
-                box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
-            }
-            
-            .download-btn {
-                background: var(--secondary-gradient);
-                color: white;
-                box-shadow: 0 10px 30px rgba(240, 147, 251, 0.4);
-            }
-            
-            .trailer-btn {
-                background: var(--accent-gradient);
-                color: white;
-                box-shadow: 0 10px 30px rgba(79, 172, 254, 0.4);
-            }
-            
-            .action-btn:hover {
-                transform: translateY(-8px) scale(1.05);
-                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
-            }
-            
-            /* Cast Section */
-            .cast-section {
-                margin: 3rem 0;
-            }
-            
-            .cast-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+                flex-direction: column;
                 gap: 1.5rem;
-                margin-top: 1.5rem;
             }
             
-            .cast-card {
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 15px;
-                padding: 1.5rem;
-                text-align: center;
-                transition: all 0.3s ease;
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            .cast-card:hover {
-                transform: translateY(-10px);
-                background: rgba(102, 126, 234, 0.15);
-                border-color: var(--accent-blue);
-                box-shadow: 0 15px 30px rgba(102, 126, 234, 0.2);
-            }
-            
-            .cast-avatar {
-                width: 100px;
-                height: 100px;
-                border-radius: 50%;
-                object-fit: cover;
-                margin: 0 auto 1rem;
-                border: 3px solid var(--accent-blue);
-                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-            }
-            
-            /* Footer */
-            footer {
-                background: rgba(5, 5, 17, 0.95);
-                padding: 4rem 2rem;
-                margin-top: 5rem;
-                border-top: 1px solid rgba(255, 255, 255, 0.1);
-                position: relative;
-                overflow: hidden;
-            }
-            
-            footer::before {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                height: 2px;
-                background: var(--primary-gradient);
-            }
-            
-            .footer-content {
-                max-width: 1400px;
-                margin: 0 auto;
-                text-align: center;
-            }
-            
-            .footer-brand {
-                font-family: 'Orbitron', sans-serif;
-                font-size: 2.5rem;
-                font-weight: 700;
-                background: linear-gradient(45deg, var(--accent-blue), var(--accent-pink));
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                margin-bottom: 1rem;
+            .form-group {
                 display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 15px;
+                flex-direction: column;
+                gap: 0.5rem;
             }
             
-            .footer-tagline {
-                font-size: 1.2rem;
+            .form-label {
                 color: var(--text-secondary);
-                margin-bottom: 2rem;
-                font-weight: 300;
-                letter-spacing: 1px;
+                font-size: 0.9rem;
             }
             
-            .footer-contact {
-                margin-top: 2rem;
-                color: var(--text-secondary);
-            }
-            
-            .contact-link {
-                color: var(--accent-blue);
-                text-decoration: none;
-                transition: all 0.3s ease;
-                font-weight: 500;
-                display: inline-flex;
-                align-items: center;
-                gap: 10px;
-                padding: 10px 20px;
-                background: rgba(102, 126, 234, 0.1);
-                border-radius: 25px;
-                border: 1px solid rgba(102, 126, 234, 0.3);
-            }
-            
-            .contact-link:hover {
+            .form-input {
+                padding: 12px 15px;
+                background: rgba(255, 255, 255, 0.1);
+                border: 2px solid rgba(255, 255, 255, 0.1);
+                border-radius: 8px;
                 color: white;
-                background: var(--primary-gradient);
-                transform: translateY(-3px);
+                font-size: 1rem;
+                transition: border-color 0.3s ease;
+            }
+            
+            .form-input:focus {
+                outline: none;
+                border-color: var(--accent-blue);
+            }
+            
+            .auth-submit {
+                padding: 15px;
+                background: var(--accent-gradient);
+                border: none;
+                border-radius: 8px;
+                color: white;
+                font-size: 1rem;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                margin-top: 1rem;
+            }
+            
+            .auth-submit:hover {
+                transform: translateY(-2px);
                 box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
             }
             
-            /* Install Prompt */
-            #install-prompt {
-                position: fixed;
-                bottom: 30px;
-                right: 30px;
-                background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
-                color: white;
-                padding: 20px;
-                border-radius: 20px;
-                display: none;
-                align-items: center;
-                gap: 20px;
-                z-index: 999;
-                box-shadow: 0 15px 35px rgba(0, 0, 0, 0.3);
-                backdrop-filter: blur(20px);
-                border: 1px solid rgba(255, 255, 255, 0.2);
-                animation: slideIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-                max-width: 400px;
+            .auth-error {
+                color: var(--danger);
+                font-size: 0.9rem;
+                text-align: center;
+                margin-top: 1rem;
             }
             
-            .install-btn {
-                background: white;
-                color: var(--dark-bg);
+            .close-auth {
+                position: absolute;
+                top: 1rem;
+                right: 1rem;
+                background: none;
                 border: none;
-                padding: 10px 20px;
-                border-radius: 10px;
-                cursor: pointer;
-                font-weight: 600;
-                transition: all 0.3s ease;
-            }
-            
-            .install-btn:hover {
-                transform: scale(1.05);
-                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-            }
-            
-            .close-install {
-                background: rgba(0, 0, 0, 0.3);
-                border: none;
-                color: white;
+                color: var(--text-secondary);
                 font-size: 1.5rem;
                 cursor: pointer;
-                width: 30px;
-                height: 30px;
-                border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                transition: all 0.3s ease;
+                transition: color 0.3s ease;
             }
             
-            .close-install:hover {
-                background: rgba(0, 0, 0, 0.5);
-                transform: rotate(90deg);
-            }
-            
-            /* Loading States */
-            .skeleton {
-                background: linear-gradient(90deg, rgba(255,255,255,0.1) 25%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0.1) 75%);
-                background-size: 200% 100%;
-                animation: skeleton-loading 1.5s infinite;
-                border-radius: 10px;
-            }
-            
-            .skeleton-card {
-                height: 400px;
-                border-radius: 20px;
-            }
-            
-            @keyframes skeleton-loading {
-                0% { background-position: -200% 0; }
-                100% { background-position: 200% 0; }
+            .close-auth:hover {
+                color: var(--text-primary);
             }
             
             /* Responsive */
             @media (max-width: 1024px) {
-                .content-grid {
-                    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-                }
-                
                 .hero-title {
                     font-size: 3rem;
+                }
+                
+                .content-section {
+                    padding: 2rem;
                 }
             }
             
             @media (max-width: 768px) {
-                .header-content {
-                    flex-direction: column;
-                    gap: 1.5rem;
+                .logo-text {
+                    font-size: 3rem;
                 }
                 
-                .search-container {
-                    width: 100%;
+                header {
+                    padding: 1rem;
+                }
+                
+                .nav-links {
+                    display: none;
+                }
+                
+                .hero {
+                    height: 60vh;
+                    min-height: 400px;
+                }
+                
+                .hero-content {
+                    padding: 0 2rem;
                 }
                 
                 .hero-title {
                     font-size: 2.5rem;
                 }
                 
-                .logo-text {
-                    font-size: 3.5rem;
+                .hero-description {
+                    font-size: 1rem;
                 }
                 
-                .content-grid {
-                    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-                    gap: 1.5rem;
+                .content-section {
+                    padding: 1rem;
                 }
                 
-                .modal-content {
-                    margin: 0;
-                    border-radius: 0;
+                .content-card {
+                    width: 180px;
                 }
                 
-                .video-container {
-                    height: 300px;
-                }
-                
-                .action-buttons {
-                    justify-content: center;
-                }
-                
-                .action-btn {
-                    min-width: 100%;
+                .card-image {
+                    height: 250px;
                 }
             }
             
             @media (max-width: 480px) {
-                .hero-title {
-                    font-size: 2rem;
-                }
-                
                 .logo-text {
                     font-size: 2.5rem;
                 }
                 
-                .content-grid {
-                    grid-template-columns: repeat(2, 1fr);
-                    gap: 1rem;
+                .hero-title {
+                    font-size: 2rem;
                 }
                 
-                .genre-nav {
-                    padding: 1rem;
+                .hero-buttons {
+                    flex-direction: column;
                 }
                 
-                .genre-btn {
-                    padding: 10px 20px;
-                    font-size: 0.9rem;
+                .content-card {
+                    width: 150px;
                 }
                 
-                .modal-body {
-                    padding: 1.5rem;
+                .card-image {
+                    height: 200px;
                 }
-                
-                .episode-grid {
-                    grid-template-columns: repeat(3, 1fr);
-                }
-            }
-            
-            /* Scrollbar */
-            ::-webkit-scrollbar {
-                width: 12px;
-            }
-            
-            ::-webkit-scrollbar-track {
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 6px;
-            }
-            
-            ::-webkit-scrollbar-thumb {
-                background: var(--primary-gradient);
-                border-radius: 6px;
-                border: 2px solid var(--dark-bg);
-            }
-            
-            ::-webkit-scrollbar-thumb:hover {
-                background: var(--secondary-gradient);
             }
         </style>
     </head>
@@ -1409,1170 +1432,673 @@ app.get('/', (req, res) => {
         <!-- Loading Screen -->
         <div id="loading-screen">
             <div class="logo-container">
-                <div class="logo-text">CLOUD.MOVIES</div>
+                <div class="logo-text">STREAMFLIX</div>
+                <div class="logo-tagline">PREMIUM ENTERTAINMENT</div>
             </div>
-            <div class="loading-ring"></div>
-            <div class="loading-text">Loading premium experience...</div>
+            <div class="loading-animation">
+                <div class="loading-dot"></div>
+                <div class="loading-dot"></div>
+                <div class="loading-dot"></div>
+            </div>
         </div>
 
         <!-- Header -->
-        <header>
-            <div class="header-content">
-                <a href="/" class="site-logo">
-                    <i class="fas fa-cloud-moon logo-icon"></i>
-                    <span>CLOUD.MOVIES</span>
+        <header id="main-header">
+            <div class="header-container">
+                <a href="/" class="logo">
+                    <i class="fas fa-play-circle"></i>
+                    STREAMFLIX
                 </a>
-                <div class="search-container">
-                    <input type="text" id="search-input" placeholder="Discover movies, series, and more...">
-                    <button class="search-btn" id="search-btn">
-                        <i class="fas fa-search"></i>
-                    </button>
+                
+                <div class="nav-links">
+                    <a href="#" class="nav-link active"><i class="fas fa-home"></i> Home</a>
+                    <a href="#movies" class="nav-link"><i class="fas fa-film"></i> Movies</a>
+                    <a href="#series" class="nav-link"><i class="fas fa-tv"></i> Series</a>
+                    <a href="#new" class="nav-link"><i class="fas fa-star"></i> New & Popular</a>
+                    <a href="#watchlist" class="nav-link"><i class="fas fa-bookmark"></i> My List</a>
+                </div>
+                
+                <div class="user-menu">
+                    <div class="search-container" style="position: relative; margin-right: 1rem;">
+                        <input type="text" id="search-input" placeholder="Search..." 
+                               style="padding: 8px 15px; border-radius: 20px; 
+                                      border: 2px solid rgba(255,255,255,0.2); 
+                                      background: rgba(255,255,255,0.1); 
+                                      color: white; width: 200px;">
+                        <button id="search-btn" style="position: absolute; right: 5px; top: 50%; 
+                                transform: translateY(-50%); background: none; border: none; 
+                                color: white; cursor: pointer;">
+                            <i class="fas fa-search"></i>
+                        </button>
+                    </div>
+                    
+                    <div id="user-actions">
+                        <!-- Will be populated by JavaScript -->
+                        <button class="auth-btn login-btn" id="login-btn">Sign In</button>
+                        <button class="auth-btn signup-btn" id="signup-btn">Sign Up</button>
+                    </div>
                 </div>
             </div>
         </header>
 
+        <!-- Hero Section -->
+        <section class="hero" id="hero-section">
+            <!-- Hero content will be populated by JavaScript -->
+        </section>
+
         <!-- Main Content -->
-        <main>
-            <section class="hero-section">
-                <h1 class="hero-title">Unlimited Entertainment</h1>
-                <p class="hero-subtitle">Stream the latest movies and TV series in stunning quality</p>
-                <div style="margin-top: 3rem;">
-                    <input type="text" id="home-search" placeholder="Try 'Avengers', 'Stranger Things', 'The Matrix'..." 
-                           style="width: 100%; max-width: 600px; padding: 18px 30px; border-radius: 50px; border: 2px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.1); color: white; font-size: 1.1rem; backdrop-filter: blur(10px);">
-                </div>
-                <div class="featured-tags">
-                    <div class="featured-tag" data-search="action">🔥 Action</div>
-                    <div class="featured-tag" data-search="comedy">😄 Comedy</div>
-                    <div class="featured-tag" data-search="sci-fi">🚀 Sci-Fi</div>
-                    <div class="featured-tag" data-search="drama">🎭 Drama</div>
-                    <div class="featured-tag" data-search="2024">🎬 2024 Releases</div>
-                </div>
-            </section>
-
-            <!-- Genre Navigation -->
-            <nav class="genre-nav" id="genre-nav">
-                <!-- Genres will be populated by JavaScript -->
-            </nav>
-
-            <!-- Content Grid -->
-            <div class="content-grid" id="content-grid">
-                <!-- Skeleton loading -->
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-                <div class="skeleton skeleton-card"></div>
-            </div>
-
-            <!-- Pagination -->
-            <div class="pagination" id="pagination"></div>
+        <main id="main-content">
+            <!-- Content rows will be populated by JavaScript -->
+            <div id="content-rows"></div>
         </main>
 
-        <!-- Detail Modal -->
-        <div class="modal" id="detail-modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2 id="modal-title" style="font-size: 2rem; font-weight: 700; letter-spacing: 1px;"></h2>
-                    <button class="close-modal" id="close-modal">
-                        <i class="fas fa-times"></i>
-                    </button>
+        <!-- Auth Modal -->
+        <div class="auth-modal" id="auth-modal">
+            <div class="auth-content">
+                <button class="close-auth" id="close-auth">&times;</button>
+                
+                <div class="auth-tabs">
+                    <button class="auth-tab active" data-tab="login">Sign In</button>
+                    <button class="auth-tab" data-tab="register">Sign Up</button>
                 </div>
-                <div class="modal-body" id="modal-body">
-                    <!-- Modal content will be populated by JavaScript -->
-                </div>
+                
+                <form class="auth-form" id="login-form" style="display: block;">
+                    <div class="form-group">
+                        <label class="form-label">Username or Email</label>
+                        <input type="text" class="form-input" id="login-username" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-input" id="login-password" required>
+                    </div>
+                    
+                    <button type="submit" class="auth-submit">Sign In</button>
+                    <div class="auth-error" id="login-error"></div>
+                </form>
+                
+                <form class="auth-form" id="register-form" style="display: none;">
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input type="text" class="form-input" id="register-username" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">Email</label>
+                        <input type="email" class="form-input" id="register-email" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">Password</label>
+                        <input type="password" class="form-input" id="register-password" required>
+                    </div>
+                    
+                    <button type="submit" class="auth-submit">Create Account</button>
+                    <div class="auth-error" id="register-error"></div>
+                </form>
             </div>
         </div>
-
-        <!-- Install Prompt -->
-        <div id="install-prompt">
-            <div style="flex: 1;">
-                <strong>Install CLOUD.MOVIES</strong>
-                <div style="font-size: 0.9rem; opacity: 0.9;">For faster access and offline viewing</div>
-            </div>
-            <button class="install-btn" id="install-btn">Add to Home Screen</button>
-            <button class="close-install" id="close-install">&times;</button>
-        </div>
-
-        <!-- Footer -->
-        <footer>
-            <div class="footer-content">
-                <div class="footer-brand">
-                    <i class="fas fa-cloud-moon"></i>
-                    CLOUD.MOVIES
-                </div>
-                <p class="footer-tagline">Premium Streaming Experience</p>
-                <p style="color: var(--text-secondary); margin-bottom: 1rem;">
-                    Stream thousands of movies and TV series in stunning quality
-                </p>
-                <div class="footer-contact">
-                    <p style="margin-bottom: 1rem;">
-                        <strong>Developed by Bruce Bera</strong> | Bera Tech Solutions
-                    </p>
-                    <a href="https://wa.me/254743983206" class="contact-link" target="_blank">
-                        <i class="fab fa-whatsapp"></i>
-                        <span>Contact: wa.me/254743983206</span>
-                    </a>
-                </div>
-                <p style="margin-top: 2rem; font-size: 0.9rem; color: var(--text-secondary); opacity: 0.7;">
-                    Powered by Gifted Movies API • © 2024 CLOUD.MOVIES
-                </p>
-            </div>
-        </footer>
 
         <!-- JavaScript -->
         <script>
-            // API Configuration
-            let currentPage = 1;
-            let totalPages = 1;
-            let currentSearch = '';
-            let currentGenre = 'all';
-            let currentContent = [];
-            let deferredPrompt;
-            let selectedMovieId = null;
-            let selectedSeason = null;
-            let selectedEpisodes = new Set();
-            let selectedQuality = '720p';
-            let movieDetails = null;
-
-            // Working genres based on API data
-            const genres = [
-                { id: 'all', name: 'All', icon: 'fas fa-film' },
-                { id: 'action', name: 'Action', icon: 'fas fa-explosion' },
-                { id: 'comedy', name: 'Comedy', icon: 'fas fa-laugh' },
-                { id: 'drama', name: 'Drama', icon: 'fas fa-masks-theater' },
-                { id: 'sci-fi', name: 'Sci-Fi', icon: 'fas fa-robot' },
-                { id: 'thriller', name: 'Thriller', icon: 'fas fa-heart-pulse' },
-                { id: 'horror', name: 'Horror', icon: 'fas fa-ghost' },
-                { id: 'romance', name: 'Romance', icon: 'fas fa-heart' },
-                { id: 'adventure', name: 'Adventure', icon: 'fas fa-mountain' },
-                { id: 'animation', name: 'Animation', icon: 'fas fa-dragon' },
-                { id: 'fantasy', name: 'Fantasy', icon: 'fas fa-wand-sparkles' },
-                { id: 'crime', name: 'Crime', icon: 'fas fa-user-secret' },
-                { id: 'mystery', name: 'Mystery', icon: 'fas fa-magnifying-glass' },
-                { id: 'family', name: 'Family', icon: 'fas fa-house' }
-            ];
-
+            // Global state
+            let currentUser = null;
+            let authToken = localStorage.getItem('authToken');
+            let featuredContent = [];
+            let watchlist = [];
+            let watchHistory = [];
+            
+            // DOM Elements
+            const loadingScreen = document.getElementById('loading-screen');
+            const mainHeader = document.getElementById('main-header');
+            const heroSection = document.getElementById('hero-section');
+            const contentRows = document.getElementById('content-rows');
+            const searchInput = document.getElementById('search-input');
+            const searchBtn = document.getElementById('search-btn');
+            const userActions = document.getElementById('user-actions');
+            const authModal = document.getElementById('auth-modal');
+            const loginBtn = document.getElementById('login-btn');
+            const signupBtn = document.getElementById('signup-btn');
+            const closeAuth = document.getElementById('close-auth');
+            const authTabs = document.querySelectorAll('.auth-tab');
+            const loginForm = document.getElementById('login-form');
+            const registerForm = document.getElementById('register-form');
+            const loginError = document.getElementById('login-error');
+            const registerError = document.getElementById('register-error');
+            
             // Initialize
             document.addEventListener('DOMContentLoaded', async () => {
-                // Hide loading screen after animations
+                // Hide loading screen
                 setTimeout(() => {
-                    document.getElementById('loading-screen').style.opacity = '0';
+                    loadingScreen.style.opacity = '0';
                     setTimeout(() => {
-                        document.getElementById('loading-screen').style.display = 'none';
+                        loadingScreen.style.display = 'none';
                     }, 500);
                 }, 1500);
-
-                // Initialize genres
-                initializeGenres();
                 
-                // Initialize search functionality
-                initializeSearch();
-                
-                // Load trending content
-                await loadTrendingContent();
-                
-                // Initialize PWA
-                initializePWA();
-                
-                // Setup home search
-                setupHomeSearch();
-                
-                // Setup featured tags
-                setupFeaturedTags();
-            });
-
-            // Initialize genres navigation
-            function initializeGenres() {
-                const genreNav = document.getElementById('genre-nav');
-                genres.forEach(genre => {
-                    const button = document.createElement('button');
-                    button.className = 'genre-btn';
-                    if (genre.id === 'all') button.classList.add('active');
-                    button.innerHTML = `<i class="${genre.icon}"></i> ${genre.name}`;
-                    button.addEventListener('click', () => filterByGenre(genre.id));
-                    genreNav.appendChild(button);
-                });
-            }
-
-            // Filter content by genre
-            function filterByGenre(genreId) {
-                currentGenre = genreId;
-                
-                // Update active genre button
-                document.querySelectorAll('.genre-btn').forEach(btn => {
-                    btn.classList.remove('active');
-                    if (btn.querySelector('i').className.includes(genreId) || genreId === 'all') {
-                        btn.classList.add('active');
+                // Setup header scroll effect
+                window.addEventListener('scroll', () => {
+                    if (window.scrollY > 50) {
+                        mainHeader.classList.add('scrolled');
+                    } else {
+                        mainHeader.classList.remove('scrolled');
                     }
                 });
                 
-                if (currentGenre === 'all') {
-                    displayContent(currentContent);
-                } else {
-                    const filtered = currentContent.filter(item => 
-                        item.genre && item.genre.some(g => 
-                            g.toLowerCase().includes(currentGenre)
-                        )
-                    );
-                    displayContent(filtered);
+                // Setup search
+                searchBtn.addEventListener('click', performSearch);
+                searchInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') performSearch();
+                });
+                
+                // Setup auth
+                setupAuth();
+                
+                // Load user if token exists
+                if (authToken) {
+                    await loadUserProfile();
+                }
+                
+                // Load content
+                await loadHomeContent();
+            });
+            
+            // Setup authentication
+            function setupAuth() {
+                // Auth modal toggle
+                loginBtn.addEventListener('click', () => {
+                    authModal.style.display = 'block';
+                    document.body.style.overflow = 'hidden';
+                });
+                
+                signupBtn.addEventListener('click', () => {
+                    authModal.style.display = 'block';
+                    document.body.style.overflow = 'hidden';
+                });
+                
+                closeAuth.addEventListener('click', closeAuthModal);
+                authModal.addEventListener('click', (e) => {
+                    if (e.target === authModal) closeAuthModal();
+                });
+                
+                // Tab switching
+                authTabs.forEach(tab => {
+                    tab.addEventListener('click', () => {
+                        const tabName = tab.dataset.tab;
+                        
+                        authTabs.forEach(t => t.classList.remove('active'));
+                        tab.classList.add('active');
+                        
+                        if (tabName === 'login') {
+                            loginForm.style.display = 'block';
+                            registerForm.style.display = 'none';
+                        } else {
+                            loginForm.style.display = 'none';
+                            registerForm.style.display = 'block';
+                        }
+                    });
+                });
+                
+                // Form submission
+                loginForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    await loginUser();
+                });
+                
+                registerForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    await registerUser();
+                });
+            }
+            
+            // Close auth modal
+            function closeAuthModal() {
+                authModal.style.display = 'none';
+                document.body.style.overflow = 'auto';
+                loginError.textContent = '';
+                registerError.textContent = '';
+            }
+            
+            // Login user
+            async function loginUser() {
+                const username = document.getElementById('login-username').value;
+                const password = document.getElementById('login-password').value;
+                
+                try {
+                    const response = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, password })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        authToken = data.token;
+                        localStorage.setItem('authToken', authToken);
+                        currentUser = data.user;
+                        
+                        closeAuthModal();
+                        updateUserUI();
+                        loadUserData();
+                    } else {
+                        loginError.textContent = data.message || 'Login failed';
+                    }
+                } catch (error) {
+                    console.error('Login error:', error);
+                    loginError.textContent = 'Login failed. Please try again.';
                 }
             }
-
-            // Setup home search
-            function setupHomeSearch() {
-                const homeSearch = document.getElementById('home-search');
-                homeSearch.addEventListener('keypress', async (e) => {
-                    if (e.key === 'Enter') {
-                        const query = e.target.value.trim();
-                        if (query) {
-                            document.getElementById('search-input').value = query;
-                            await performSearch(query);
-                        }
+            
+            // Register user
+            async function registerUser() {
+                const username = document.getElementById('register-username').value;
+                const email = document.getElementById('register-email').value;
+                const password = document.getElementById('register-password').value;
+                
+                try {
+                    const response = await fetch('/api/auth/register', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, email, password })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        authToken = data.token;
+                        localStorage.setItem('authToken', authToken);
+                        currentUser = data.user;
+                        
+                        closeAuthModal();
+                        updateUserUI();
+                    } else {
+                        registerError.textContent = data.message || 'Registration failed';
                     }
+                } catch (error) {
+                    console.error('Registration error:', error);
+                    registerError.textContent = 'Registration failed. Please try again.';
+                }
+            }
+            
+            // Load user profile
+            async function loadUserProfile() {
+                try {
+                    const response = await fetch('/api/user/profile', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        currentUser = data.user;
+                        updateUserUI();
+                        loadUserData();
+                    } else {
+                        localStorage.removeItem('authToken');
+                        authToken = null;
+                    }
+                } catch (error) {
+                    console.error('Profile load error:', error);
+                    localStorage.removeItem('authToken');
+                    authToken = null;
+                }
+            }
+            
+            // Load user data
+            async function loadUserData() {
+                try {
+                    // Load watchlist
+                    const watchlistRes = await fetch('/api/user/watchlist', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    const watchlistData = await watchlistRes.json();
+                    if (watchlistData.success) {
+                        watchlist = watchlistData.watchlist;
+                    }
+                    
+                    // Load history
+                    const historyRes = await fetch('/api/user/history', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    const historyData = await historyRes.json();
+                    if (historyData.success) {
+                        watchHistory = historyData.history;
+                    }
+                } catch (error) {
+                    console.error('User data load error:', error);
+                }
+            }
+            
+            // Update user UI
+            function updateUserUI() {
+                if (currentUser) {
+                    userActions.innerHTML = `
+                        <div style="display: flex; align-items: center; gap: 1rem;">
+                            <div style="color: var(--text-primary);">
+                                Welcome, <strong>${currentUser.username}</strong>
+                            </div>
+                            <button class="auth-btn login-btn" id="logout-btn">Logout</button>
+                        </div>
+                    `;
+                    
+                    document.getElementById('logout-btn').addEventListener('click', logoutUser);
+                } else {
+                    userActions.innerHTML = `
+                        <button class="auth-btn login-btn" id="login-btn">Sign In</button>
+                        <button class="auth-btn signup-btn" id="signup-btn">Sign Up</button>
+                    `;
+                    
+                    // Re-attach event listeners
+                    document.getElementById('login-btn').addEventListener('click', () => {
+                        authModal.style.display = 'block';
+                        document.body.style.overflow = 'hidden';
+                    });
+                    
+                    document.getElementById('signup-btn').addEventListener('click', () => {
+                        authModal.style.display = 'block';
+                        document.body.style.overflow = 'hidden';
+                    });
+                }
+            }
+            
+            // Logout user
+            function logoutUser() {
+                localStorage.removeItem('authToken');
+                authToken = null;
+                currentUser = null;
+                watchlist = [];
+                watchHistory = [];
+                
+                updateUserUI();
+            }
+            
+            // Load home content
+            async function loadHomeContent() {
+                try {
+                    // Load featured categories
+                    const featuredRes = await fetch('/api/featured');
+                    const featuredData = await featuredRes.json();
+                    
+                    if (featuredData.success) {
+                        featuredContent = featuredData.categories;
+                        
+                        // Set hero with first featured item
+                        if (featuredContent.length > 0 && featuredContent[0].items.length > 0) {
+                            setHeroContent(featuredContent[0].items[0]);
+                        }
+                        
+                        // Display content rows
+                        displayContentRows();
+                    }
+                    
+                    // Load trending
+                    await loadTrendingRow();
+                    
+                    // Load continue watching if logged in
+                    if (currentUser) {
+                        await loadContinueWatchingRow();
+                    }
+                    
+                    // Load recommendations
+                    await loadRecommendationsRow();
+                } catch (error) {
+                    console.error('Home content error:', error);
+                    showError('Failed to load content');
+                }
+            }
+            
+            // Set hero content
+            function setHeroContent(content) {
+                heroSection.innerHTML = `
+                    <img src="${content.cover || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
+                         class="hero-backdrop" 
+                         alt="${content.title}"
+                         onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1'">
+                    
+                    <div class="hero-content">
+                        <div class="hero-info">
+                            <h1 class="hero-title">${content.title}</h1>
+                            <p class="hero-description">
+                                Discover amazing content in stunning quality. Stream your favorite movies and TV series anytime, anywhere.
+                            </p>
+                            <div class="hero-actions">
+                                <button class="hero-btn play-btn" data-id="${content.id}">
+                                    <i class="fas fa-play"></i> Play Now
+                                </button>
+                                <button class="hero-btn info-btn" data-id="${content.id}">
+                                    <i class="fas fa-info-circle"></i> More Info
+                                </button>
+                            </div>
+                            <div class="hero-meta">
+                                <span><i class="fas fa-star"></i> ${content.rating || 'N/A'}/10</span>
+                                <span><i class="fas fa-clock"></i> ${content.type === 'tv' ? 'Series' : 'Movie'}</span>
+                                <span><i class="fas fa-calendar"></i> ${content.year || 'N/A'}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                // Add event listeners to hero buttons
+                heroSection.querySelector('.play-btn').addEventListener('click', (e) => {
+                    const id = e.target.closest('button').dataset.id;
+                    playContent(id);
+                });
+                
+                heroSection.querySelector('.info-btn').addEventListener('click', (e) => {
+                    const id = e.target.closest('button').dataset.id;
+                    showContentDetails(id);
                 });
             }
-
-            // Setup featured tags
-            function setupFeaturedTags() {
-                document.querySelectorAll('.featured-tag').forEach(tag => {
-                    tag.addEventListener('click', async () => {
-                        const search = tag.dataset.search;
-                        document.getElementById('home-search').value = search;
-                        document.getElementById('search-input').value = search;
-                        await performSearch(search);
+            
+            // Display content rows
+            function displayContentRows() {
+                let rowsHTML = '';
+                
+                featuredContent.forEach(category => {
+                    if (category.items.length > 0) {
+                        rowsHTML += `
+                            <div class="content-section">
+                                <div class="section-header">
+                                    <h2 class="section-title">
+                                        <i class="fas fa-${getCategoryIcon(category.id)}"></i>
+                                        ${category.title}
+                                    </h2>
+                                    <a href="#" class="section-link" data-query="${category.query}">
+                                        View All <i class="fas fa-chevron-right"></i>
+                                    </a>
+                                </div>
+                                <div class="content-row">
+                                    ${category.items.map(item => createContentCard(item)).join('')}
+                                </div>
+                            </div>
+                        `;
+                    }
+                });
+                
+                contentRows.innerHTML = rowsHTML;
+                
+                // Add event listeners to view all links
+                document.querySelectorAll('.section-link').forEach(link => {
+                    link.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        const query = e.target.closest('a').dataset.query;
+                        performSearch(query);
                     });
                 });
             }
-
-            // Initialize search functionality
-            function initializeSearch() {
-                const searchInput = document.getElementById('search-input');
-                const searchBtn = document.getElementById('search-btn');
-                
-                searchBtn.addEventListener('click', async () => {
-                    const query = searchInput.value.trim();
-                    if (query) {
-                        await performSearch(query);
-                    }
-                });
-                
-                searchInput.addEventListener('keypress', async (e) => {
-                    if (e.key === 'Enter') {
-                        const query = e.target.value.trim();
-                        if (query) {
-                            await performSearch(query);
-                        }
-                    }
-                });
-            }
-
-            // Load trending content
-            async function loadTrendingContent() {
-                showSkeletonLoading();
+            
+            // Load trending row
+            async function loadTrendingRow() {
                 try {
                     const response = await fetch('/api/trending');
                     const data = await response.json();
                     
                     if (data.success && data.results.length > 0) {
-                        currentContent = data.results;
-                        displayContent(data.results);
-                    } else {
-                        // Fallback search
-                        await performSearch('movie');
-                    }
-                } catch (error) {
-                    console.error('Error loading content:', error);
-                    showError('Failed to load content. Please try again.');
-                }
-            }
-
-            // Perform search
-            async function performSearch(query) {
-                showSkeletonLoading();
-                currentSearch = query;
-                currentPage = 1;
-                
-                try {
-                    const response = await fetch(`/api/search/${encodeURIComponent(query)}`);
-                    const data = await response.json();
-                    
-                    if (data.success) {
-                        currentContent = data.results;
-                        displayContent(data.results);
-                        updatePagination(data.pagination);
-                        
-                        // Scroll to content
-                        document.querySelector('.content-grid').scrollIntoView({ 
-                            behavior: 'smooth' 
-                        });
-                        
-                        // Update home search field
-                        document.getElementById('home-search').value = query;
-                    } else {
-                        showError('No results found. Try another search.');
-                    }
-                } catch (error) {
-                    console.error('Search error:', error);
-                    showError('Search failed. Please try again.');
-                }
-            }
-
-            // Display content in grid
-            function displayContent(items) {
-                const grid = document.getElementById('content-grid');
-                
-                if (!items || items.length === 0) {
-                    grid.innerHTML = `
-                        <div style="grid-column: 1/-1; text-align: center; padding: 4rem;">
-                            <div style="font-size: 5rem; color: var(--text-secondary); opacity: 0.3; margin-bottom: 1rem;">
-                                <i class="fas fa-film"></i>
+                        const trendingHTML = `
+                            <div class="content-section">
+                                <div class="section-header">
+                                    <h2 class="section-title">
+                                        <i class="fas fa-fire"></i>
+                                        Trending Now
+                                    </h2>
+                                </div>
+                                <div class="content-row">
+                                    ${data.results.map(item => createContentCard(item)).join('')}
+                                </div>
                             </div>
-                            <h3 style="color: var(--text-secondary); margin-bottom: 1rem;">No Content Found</h3>
-                            <p style="color: var(--text-secondary); opacity: 0.7;">Try searching for something else</p>
+                        `;
+                        
+                        contentRows.insertAdjacentHTML('beforeend', trendingHTML);
+                    }
+                } catch (error) {
+                    console.error('Trending load error:', error);
+                }
+            }
+            
+            // Load continue watching row
+            async function loadContinueWatchingRow() {
+                if (watchHistory.length > 0) {
+                    const continueHTML = `
+                        <div class="content-section">
+                            <div class="section-header">
+                                <h2 class="section-title">
+                                    <i class="fas fa-history"></i>
+                                    Continue Watching
+                                </h2>
+                            </div>
+                            <div class="content-row">
+                                ${watchHistory.slice(0, 10).map(item => createContentCard(item, true)).join('')}
+                            </div>
                         </div>
                     `;
-                    return;
+                    
+                    contentRows.insertAdjacentHTML('afterbegin', continueHTML);
                 }
+            }
+            
+            // Load recommendations row
+            async function loadRecommendationsRow() {
+                try {
+                    const response = await fetch('/api/recommendations', {
+                        headers: { 'Authorization': authToken ? `Bearer ${authToken}` : '' }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success && data.recommendations.length > 0) {
+                        const recsHTML = `
+                            <div class="content-section">
+                                <div class="section-header">
+                                    <h2 class="section-title">
+                                        <i class="fas fa-thumbs-up"></i>
+                                        Recommended For You
+                                    </h2>
+                                </div>
+                                <div class="content-row">
+                                    ${data.recommendations.map(item => createContentCard(item)).join('')}
+                                </div>
+                            </div>
+                        `;
+                        
+                        contentRows.insertAdjacentHTML('beforeend', recsHTML);
+                    }
+                } catch (error) {
+                    console.error('Recommendations error:', error);
+                }
+            }
+            
+            // Create content card
+            function createContentCard(item, isHistory = false) {
+                const inWatchlist = watchlist.some(w => w.contentId === item.id);
+                const progress = isHistory && item.position && item.duration 
+                    ? Math.round((item.position / item.duration) * 100) 
+                    : 0;
                 
-                grid.innerHTML = items.map(item => `
+                return `
                     <div class="content-card" data-id="${item.id}">
-                        ${item.rating ? `
-                            <div class="rating-badge">
-                                <i class="fas fa-star"></i>
-                                <span>${item.rating}</span>
-                            </div>
+                        <img src="${item.cover || item.thumbnail || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
+                             class="card-image" 
+                             alt="${item.title}"
+                             onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1'">
+                        
+                        ${isHistory && progress > 0 ? `
+                            <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: var(--accent-red); width: ${progress}%;"></div>
                         ` : ''}
-                        <img src="${item.cover || item.poster || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?auto=format&fit=crop&w=500&q=80'}" 
-                             alt="${item.title}" 
-                             class="card-poster"
-                             onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1?auto=format&fit=crop&w=500&q=80'">
-                        <div class="card-info">
-                            <h3 class="card-title" title="${item.title}">${item.title}</h3>
+                        
+                        <div class="card-overlay">
+                            <h3 class="card-title">${item.title}</h3>
                             <div class="card-meta">
-                                <span>${item.year || 'N/A'}</span>
-                                <span><i class="fas fa-${item.type === 'tv' ? 'tv' : 'film'}"></i> ${item.type === 'tv' ? 'Series' : 'Movie'}</span>
+                                <span>${item.rating ? `⭐ ${item.rating}` : ''}</span>
+                                <span>${item.type === 'tv' ? '📺 Series' : '🎬 Movie'}</span>
                             </div>
-                            ${item.genre && item.genre.length > 0 ? `
-                                <div class="card-genres">
-                                    ${item.genre.slice(0, 2).map(g => `
-                                        <span class="genre-tag">${g}</span>
-                                    `).join('')}
-                                </div>
-                            ` : ''}
-                        </div>
-                    </div>
-                `).join('');
-                
-                // Add click event listeners
-                grid.querySelectorAll('.content-card').forEach(card => {
-                    card.addEventListener('click', async () => {
-                        const id = card.dataset.id;
-                        await showDetails(id);
-                    });
-                });
-            }
-
-            // Show content details
-            async function showDetails(id) {
-                showModalLoading();
-                selectedMovieId = id;
-                selectedEpisodes.clear();
-                
-                try {
-                    const response = await fetch(`/api/info/${id}`);
-                    const data = await response.json();
-                    
-                    if (data.success) {
-                        movieDetails = data.data;
-                        displayDetails(data.data);
-                    } else {
-                        showModalError('Failed to load details.');
-                    }
-                } catch (error) {
-                    console.error('Details error:', error);
-                    showModalError('Failed to load details.');
-                }
-            }
-
-            // Display details in modal
-            function displayDetails(movie) {
-                const modal = document.getElementById('detail-modal');
-                const modalBody = document.getElementById('modal-body');
-                const modalTitle = document.getElementById('modal-title');
-                
-                modalTitle.textContent = movie.title;
-                
-                // Check if it's a TV series
-                const isTV = movie.type === 'tv';
-                const hasEpisodes = movie.episodes && movie.episodes.length > 0;
-                
-                // Build episodes HTML if available
-                let episodesHtml = '';
-                if (hasEpisodes) {
-                    const seasons = [...new Set(movie.episodes.map(ep => ep.season))];
-                    
-                    episodesHtml = `
-                        <div class="episode-section">
-                            <h3><i class="fas fa-tv"></i> Seasons & Episodes</h3>
-                            <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">Select multiple episodes for batch streaming or download</p>
-                            
-                            <div class="season-selector" id="season-selector">
-                                ${seasons.map(season => {
-                                    const seasonEpisodes = movie.episodes.filter(ep => ep.season === season);
-                                    const episodeCount = seasonEpisodes.length;
-                                    return `
-                                        <div class="season-card" data-season="${season}">
-                                            <div style="font-size: 2rem; margin-bottom: 0.5rem; color: var(--accent-blue);">
-                                                <i class="fas fa-play-circle"></i>
-                                            </div>
-                                            <div style="font-weight: 600;">Season ${season}</div>
-                                            <div style="font-size: 0.9rem; color: var(--text-secondary);">
-                                                ${episodeCount} episode${episodeCount !== 1 ? 's' : ''}
-                                            </div>
-                                        </div>
-                                    `;
-                                }).join('')}
-                            </div>
-                            
-                            <div id="episode-container" style="display: none;">
-                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                                    <h4>Episodes</h4>
-                                    <button id="select-all-btn" class="batch-btn batch-play" style="padding: 8px 16px; font-size: 0.9rem;">
-                                        <i class="fas fa-check-double"></i> Select All
-                                    </button>
-                                </div>
-                                <div class="episode-grid" id="episode-grid"></div>
-                                
-                                <div class="batch-actions">
-                                    <button id="batch-play-btn" class="batch-btn batch-play" disabled>
-                                        <i class="fas fa-play-circle"></i> Play Selected (0)
-                                    </button>
-                                    <button id="batch-download-btn" class="batch-btn batch-download" disabled>
-                                        <i class="fas fa-download"></i> Download Selected (0)
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }
-                
-                // Build cast HTML if available
-                let castHtml = '';
-                if (movie.cast && movie.cast.length > 0) {
-                    castHtml = `
-                        <div class="cast-section">
-                            <h3><i class="fas fa-users"></i> Cast & Crew</h3>
-                            <div class="cast-grid">
-                                ${movie.cast.slice(0, 8).map(person => `
-                                    <div class="cast-card">
-                                        <img src="${person.avatar || 'https://images.unsplash.com/photo-1494790108755-2616b612b786?auto=format&fit=crop&w=200&q=80'}" 
-                                             alt="${person.name}" 
-                                             class="cast-avatar"
-                                             onerror="this.src='https://images.unsplash.com/photo-1494790108755-2616b612b786?auto=format&fit=crop&w=200&q=80'">
-                                        <div style="margin-top: 0.5rem;">
-                                            <strong>${person.name}</strong>
-                                            <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 0.25rem;">
-                                                ${person.character || 'Actor'}
-                                            </div>
-                                        </div>
-                                    </div>
-                                `).join('')}
-                            </div>
-                        </div>
-                    `;
-                }
-                
-                modalBody.innerHTML = `
-                    <div class="detail-content">
-                        <div style="display: grid; grid-template-columns: 1fr 2fr; gap: 3rem; margin-bottom: 3rem;">
-                            <div>
-                                <img src="${movie.poster || movie.cover || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?auto=format&fit=crop&w=500&q=80'}" 
-                                     alt="${movie.title}" 
-                                     style="width: 100%; border-radius: 20px; border: 2px solid var(--accent-blue); box-shadow: 0 20px 40px rgba(102, 126, 234, 0.3);"
-                                     onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1?auto=format&fit=crop&w=500&q=80'">
-                            </div>
-                            <div>
-                                <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap;">
-                                    ${movie.rating ? `
-                                        <div style="background: var(--primary-gradient); color: white; padding: 8px 16px; border-radius: 25px; font-weight: 600; display: flex; align-items: center; gap: 5px;">
-                                            <i class="fas fa-star"></i>
-                                            <span>${movie.rating}/10</span>
-                                        </div>
-                                    ` : ''}
-                                    <div style="background: rgba(255,255,255,0.1); color: white; padding: 8px 16px; border-radius: 25px; font-weight: 500;">
-                                        <i class="fas fa-${isTV ? 'tv' : 'film'}"></i>
-                                        <span>${isTV ? 'TV Series' : 'Movie'}</span>
-                                    </div>
-                                    ${movie.country ? `
-                                        <div style="background: rgba(255,255,255,0.1); color: white; padding: 8px 16px; border-radius: 25px; font-weight: 500;">
-                                            <i class="fas fa-globe"></i>
-                                            <span>${movie.country}</span>
-                                        </div>
-                                    ` : ''}
-                                </div>
-                                
-                                <div style="display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap;">
-                                    ${movie.genre && movie.genre.length > 0 ? movie.genre.map(g => `
-                                        <span style="background: rgba(102, 126, 234, 0.15); padding: 8px 16px; border-radius: 20px; border: 1px solid rgba(102, 126, 234, 0.3); color: var(--accent-blue); font-weight: 500;">
-                                            ${g}
-                                        </span>
-                                    `).join('') : ''}
-                                </div>
-                                
-                                <p style="margin-bottom: 2rem; line-height: 1.8; color: var(--text-secondary); font-size: 1.1rem;">
-                                    ${movie.description || 'No description available.'}
-                                </p>
-                                
-                                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5rem; margin-bottom: 2rem;">
-                                    ${movie.releaseDate ? `
-                                        <div>
-                                            <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;">Release Date</div>
-                                            <div style="font-weight: 600; display: flex; align-items: center; gap: 10px;">
-                                                <i class="fas fa-calendar"></i>
-                                                <span>${movie.releaseDate}</span>
-                                            </div>
-                                        </div>
-                                    ` : ''}
-                                    
-                                    ${movie.duration ? `
-                                        <div>
-                                            <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;">Duration</div>
-                                            <div style="font-weight: 600; display: flex; align-items: center; gap: 10px;">
-                                                <i class="fas fa-clock"></i>
-                                                <span>${Math.floor(movie.duration / 60)} minutes</span>
-                                            </div>
-                                        </div>
-                                    ` : ''}
-                                    
-                                    ${movie.subtitles ? `
-                                        <div style="grid-column: span 2;">
-                                            <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;">Subtitles</div>
-                                            <div style="font-weight: 600; display: flex; align-items: center; gap: 10px;">
-                                                <i class="fas fa-closed-captioning"></i>
-                                                <span>${movie.subtitles.split(',').slice(0, 3).join(', ')}${movie.subtitles.split(',').length > 3 ? '...' : ''}</span>
-                                            </div>
-                                        </div>
-                                    ` : ''}
-                                </div>
-                            </div>
-                        </div>
-                        
-                        ${castHtml}
-                        
-                        ${episodesHtml}
-                        
-                        <div class="quality-selector">
-                            <h3><i class="fas fa-hd"></i> Select Quality</h3>
-                            <div class="quality-grid">
-                                <div class="quality-card active" data-quality="360p">
-                                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem; color: var(--accent-blue);">
-                                        <i class="fas fa-tv"></i>
-                                    </div>
-                                    <div style="font-weight: 600;">360p</div>
-                                    <div style="font-size: 0.9rem; color: var(--text-secondary);">Good</div>
-                                </div>
-                                <div class="quality-card" data-quality="480p">
-                                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem; color: var(--accent-blue);">
-                                        <i class="fas fa-tv"></i>
-                                    </div>
-                                    <div style="font-weight: 600;">480p</div>
-                                    <div style="font-size: 0.9rem; color: var(--text-secondary);">Better</div>
-                                </div>
-                                <div class="quality-card" data-quality="720p">
-                                    <div style="font-size: 1.5rem; margin-bottom: 0.5rem; color: var(--accent-blue);">
-                                        <i class="fas fa-hd"></i>
-                                    </div>
-                                    <div style="font-weight: 600;">720p</div>
-                                    <div style="font-size: 0.9rem; color: var(--text-secondary);">HD</div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="action-buttons">
-                            <button class="action-btn stream-btn" id="play-single">
-                                <i class="fas fa-play-circle"></i>
-                                <span>Stream Now</span>
-                            </button>
-                            <button class="action-btn download-btn" id="download-single">
-                                <i class="fas fa-download"></i>
-                                <span>Download</span>
-                            </button>
-                            ${movie.trailer ? `
-                                <button class="action-btn trailer-btn" id="play-trailer">
+                            <div class="card-actions">
+                                <button class="card-btn play-btn" title="Play">
                                     <i class="fas fa-play"></i>
-                                    <span>Watch Trailer</span>
                                 </button>
-                            ` : ''}
-                        </div>
-                        
-                        <div id="video-container" class="video-container" style="display: none; margin-top: 3rem;">
-                            <video id="video-player" controls style="width: 100%; height: 100%;">
-                                Your browser does not support the video tag.
-                            </video>
+                                <button class="card-btn info-btn" title="More Info">
+                                    <i class="fas fa-info-circle"></i>
+                                </button>
+                                <button class="card-btn watchlist-btn ${inWatchlist ? 'in-watchlist' : ''}" title="${inWatchlist ? 'Remove from Watchlist' : 'Add to Watchlist'}">
+                                    <i class="fas ${inWatchlist ? 'fa-check' : 'fa-plus'}"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 `;
-                
-                // Setup season selection for TV shows
-                if (hasEpisodes) {
-                    const seasonSelector = modalBody.querySelector('#season-selector');
-                    seasonSelector.querySelectorAll('.season-card').forEach(card => {
-                        card.addEventListener('click', function() {
-                            selectedSeason = this.dataset.season;
-                            
-                            // Update active season
-                            seasonSelector.querySelectorAll('.season-card').forEach(b => 
-                                b.classList.remove('active')
-                            );
-                            this.classList.add('active');
-                            
-                            // Show episodes for this season
-                            const episodeContainer = modalBody.querySelector('#episode-container');
-                            const episodeGrid = modalBody.querySelector('#episode-grid');
-                            
-                            const seasonEpisodes = movie.episodes.filter(ep => ep.season == selectedSeason);
-                            
-                            episodeGrid.innerHTML = seasonEpisodes.map(ep => `
-                                <div>
-                                    <input type="checkbox" id="ep-${selectedSeason}-${ep.episode}" 
-                                           class="episode-checkbox" 
-                                           data-season="${selectedSeason}" 
-                                           data-episode="${ep.episode}">
-                                    <label for="ep-${selectedSeason}-${ep.episode}" class="episode-label">
-                                        <div style="font-size: 1.2rem; margin-bottom: 0.5rem;">
-                                            <i class="fas fa-play"></i>
-                                        </div>
-                                        <div style="font-weight: 600;">Episode ${ep.episode}</div>
-                                    </label>
-                                </div>
-                            `).join('');
-                            
-                            episodeContainer.style.display = 'block';
-                            
-                            // Setup episode selection
-                            setupEpisodeSelection();
-                            
-                            // Scroll to episodes
-                            episodeContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                        });
-                    });
-                    
-                    // Setup select all button
-                    const selectAllBtn = modalBody.querySelector('#select-all-btn');
-                    selectAllBtn.addEventListener('click', () => {
-                        const checkboxes = modalBody.querySelectorAll('.episode-checkbox');
-                        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-                        
-                        checkboxes.forEach(cb => {
-                            cb.checked = !allChecked;
-                            if (cb.checked) {
-                                selectedEpisodes.add(`s${cb.dataset.season}e${cb.dataset.episode}`);
-                            } else {
-                                selectedEpisodes.delete(`s${cb.dataset.season}e${cb.dataset.episode}`);
-                            }
-                        });
-                        
-                        updateBatchButtons();
-                        selectAllBtn.innerHTML = `<i class="fas fa-${allChecked ? 'check' : 'check-double'}"></i> ${allChecked ? 'Select All' : 'Deselect All'}`;
-                    });
-                    
-                    // Setup batch buttons
-                    const batchPlayBtn = modalBody.querySelector('#batch-play-btn');
-                    const batchDownloadBtn = modalBody.querySelector('#batch-download-btn');
-                    
-                    batchPlayBtn.addEventListener('click', () => playBatchEpisodes());
-                    batchDownloadBtn.addEventListener('click', () => downloadBatchEpisodes());
-                }
-                
-                // Setup quality selector
-                modalBody.querySelectorAll('.quality-card').forEach(card => {
-                    card.addEventListener('click', function() {
-                        selectedQuality = this.dataset.quality;
-                        
-                        modalBody.querySelectorAll('.quality-card').forEach(b => 
-                            b.classList.remove('active')
-                        );
-                        this.classList.add('active');
-                    });
-                });
-                
-                // Setup play button for single episode/movie
-                modalBody.querySelector('#play-single').addEventListener('click', async () => {
-                    if (isTV && selectedSeason && selectedEpisodes.size === 1) {
-                        const episode = Array.from(selectedEpisodes)[0];
-                        const [season, ep] = episode.replace('s', '').replace('e', '').split('e');
-                        await playStream(season, ep);
-                    } else {
-                        await playStream();
-                    }
-                });
-                
-                // Setup download button for single episode/movie
-                modalBody.querySelector('#download-single').addEventListener('click', async () => {
-                    if (isTV && selectedSeason && selectedEpisodes.size === 1) {
-                        const episode = Array.from(selectedEpisodes)[0];
-                        const [season, ep] = episode.replace('s', '').replace('e', '').split('e');
-                        await downloadMovie(season, ep);
-                    } else {
-                        await downloadMovie();
-                    }
-                });
-                
-                // Setup trailer button
-                if (movie.trailer) {
-                    modalBody.querySelector('#play-trailer').addEventListener('click', () => {
-                        const videoContainer = modalBody.querySelector('#video-container');
-                        const videoPlayer = modalBody.querySelector('#video-player');
-                        
-                        videoPlayer.src = movie.trailer;
-                        videoContainer.style.display = 'block';
-                        videoPlayer.play();
-                        
-                        // Scroll to video
-                        videoContainer.scrollIntoView({ behavior: 'smooth' });
-                    });
-                }
-                
-                modal.style.display = 'block';
-                document.body.style.overflow = 'hidden';
-                
-                // Close modal
-                document.getElementById('close-modal').addEventListener('click', closeModal);
-                
-                // Close modal on outside click
-                modal.addEventListener('click', (e) => {
-                    if (e.target === modal) {
-                        closeModal();
-                    }
-                });
             }
-
-            // Setup episode selection
-            function setupEpisodeSelection() {
-                const checkboxes = document.querySelectorAll('.episode-checkbox');
-                checkboxes.forEach(cb => {
-                    cb.addEventListener('change', function() {
-                        const episodeKey = `s${this.dataset.season}e${this.dataset.episode}`;
-                        
-                        if (this.checked) {
-                            selectedEpisodes.add(episodeKey);
-                        } else {
-                            selectedEpisodes.delete(episodeKey);
-                        }
-                        
-                        updateBatchButtons();
-                    });
-                });
+            
+            // Get category icon
+            function getCategoryIcon(categoryId) {
+                const icons = {
+                    'featured-action': 'explosion',
+                    'featured-comedy': 'laugh',
+                    'featured-scifi': 'robot',
+                    'featured-drama': 'masks-theater',
+                    'featured-2024': 'calendar-star'
+                };
+                
+                return icons[categoryId] || 'film';
             }
-
-            // Update batch buttons
-            function updateBatchButtons() {
-                const batchPlayBtn = document.querySelector('#batch-play-btn');
-                const batchDownloadBtn = document.querySelector('#batch-download-btn');
-                const count = selectedEpisodes.size;
-                
-                if (count > 0) {
-                    batchPlayBtn.disabled = false;
-                    batchDownloadBtn.disabled = false;
-                    batchPlayBtn.innerHTML = `<i class="fas fa-play-circle"></i> Play Selected (${count})`;
-                    batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download Selected (${count})`;
-                } else {
-                    batchPlayBtn.disabled = true;
-                    batchDownloadBtn.disabled = true;
-                    batchPlayBtn.innerHTML = `<i class="fas fa-play-circle"></i> Play Selected (0)`;
-                    batchDownloadBtn.innerHTML = `<i class="fas fa-download"></i> Download Selected (0)`;
-                }
+            
+            // Play content
+            async function playContent(id) {
+                // Implementation for playing content
+                console.log('Play content:', id);
+                // You would open your video player modal here
             }
-
-            // Play single stream
-            async function playStream(season = null, episode = null) {
-                if (!selectedMovieId) return;
-                
-                try {
-                    const videoContainer = document.querySelector('#video-container');
-                    const videoPlayer = document.querySelector('#video-player');
-                    
-                    // Build URL with parameters
-                    let streamUrl = `/api/stream/${selectedMovieId}?quality=${selectedQuality}`;
-                    if (season) streamUrl += `&season=${season}`;
-                    if (episode) streamUrl += `&episode=${episode}`;
-                    
-                    videoPlayer.src = streamUrl;
-                    videoContainer.style.display = 'block';
-                    videoPlayer.play();
-                    
-                    // Scroll to video
-                    videoContainer.scrollIntoView({ behavior: 'smooth' });
-                } catch (error) {
-                    console.error('Stream error:', error);
-                    showModalError('Failed to start stream. Please try again.');
-                }
+            
+            // Show content details
+            async function showContentDetails(id) {
+                // Implementation for showing details
+                console.log('Show details for:', id);
+                // You would open your details modal here
             }
-
-            // Play batch episodes
-            async function playBatchEpisodes() {
-                if (selectedEpisodes.size === 0) return;
+            
+            // Perform search
+            async function performSearch() {
+                const query = searchInput.value.trim();
+                if (!query) return;
                 
-                // For now, play first episode in batch
-                const firstEpisode = Array.from(selectedEpisodes)[0];
-                const [season, episode] = firstEpisode.replace('s', '').replace('e', '').split('e');
-                
-                await playStream(season, episode);
-                
-                // Show notification
-                showNotification(`Playing episode ${episode} of ${selectedEpisodes.size} selected`, 'info');
+                // Redirect to search results
+                window.location.href = `/search.html?q=${encodeURIComponent(query)}`;
             }
-
-            // Download single movie/episode
-            async function downloadMovie(season = null, episode = null) {
-                if (!selectedMovieId) return;
-                
-                try {
-                    // First get sources to get the direct download URL
-                    let sourcesUrl = `/api/sources/${selectedMovieId}`;
-                    if (season) sourcesUrl += `?season=${season}`;
-                    if (episode) sourcesUrl += `${season ? '&' : '?'}episode=${episode}`;
-                    
-                    const response = await fetch(sourcesUrl);
-                    const data = await response.json();
-                    
-                    if (data.success && data.sources.length > 0) {
-                        // Find the selected quality or fallback to first available
-                        const source = data.sources.find(s => s.quality === selectedQuality) || data.sources[0];
-                        
-                        if (source && source.download_url) {
-                            // Create a temporary link to trigger download
-                            const link = document.createElement('a');
-                            link.href = source.download_url;
-                            const fileName = movieDetails ? 
-                                `${movieDetails.title} ${season ? `S${season}E${episode}` : ''} - ${selectedQuality}.mp4` :
-                                `download-${selectedQuality}.mp4`;
-                            link.download = fileName;
-                            document.body.appendChild(link);
-                            link.click();
-                            document.body.removeChild(link);
-                            
-                            showNotification('Download started!', 'success');
-                        } else {
-                            showModalError('Download not available for this quality.');
-                        }
-                    } else {
-                        showModalError('Download sources not available.');
-                    }
-                } catch (error) {
-                    console.error('Download error:', error);
-                    showModalError('Download failed. Please try again.');
-                }
-            }
-
-            // Download batch episodes
-            async function downloadBatchEpisodes() {
-                if (selectedEpisodes.size === 0) return;
-                
-                // For batch download, we'll download them one by one
-                const episodesArray = Array.from(selectedEpisodes);
-                let completed = 0;
-                
-                for (const episode of episodesArray) {
-                    const [season, ep] = episode.replace('s', '').replace('e', '').split('e');
-                    
-                    // Add small delay between downloads
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    
-                    try {
-                        const sourcesUrl = `/api/sources/${selectedMovieId}?season=${season}&episode=${ep}`;
-                        const response = await fetch(sourcesUrl);
-                        const data = await response.json();
-                        
-                        if (data.success && data.sources.length > 0) {
-                            const source = data.sources.find(s => s.quality === selectedQuality) || data.sources[0];
-                            
-                            if (source && source.download_url) {
-                                const link = document.createElement('a');
-                                link.href = source.download_url;
-                                link.download = `${movieDetails.title} S${season}E${ep} - ${selectedQuality}.mp4`;
-                                document.body.appendChild(link);
-                                link.click();
-                                document.body.removeChild(link);
-                                
-                                completed++;
-                                
-                                // Update notification
-                                showNotification(`Downloading ${completed}/${episodesArray.length}...`, 'info');
-                            }
-                        }
-                    } catch (error) {
-                        console.error(`Error downloading ${episode}:`, error);
-                    }
-                }
-                
-                showNotification(`Downloaded ${completed} of ${episodesArray.length} episodes`, 'success');
-            }
-
-            // Update pagination
-            function updatePagination(pagination) {
-                const paginationDiv = document.getElementById('pagination');
-                
-                if (!pagination || pagination.totalPages <= 1) {
-                    paginationDiv.innerHTML = '';
-                    return;
-                }
-                
-                totalPages = pagination.totalPages;
-                
-                let html = '<div style="display: flex; justify-content: center; align-items: center; gap: 1rem; margin: 3rem 0;">';
-                
-                if (currentPage > 1) {
-                    html += `<button onclick="changePage(${currentPage - 1})" 
-                                    style="padding: 12px 24px; background: var(--primary-gradient); border: none; border-radius: 10px; color: white; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600; transition: all 0.3s ease;">
-                                <i class="fas fa-chevron-left"></i> Previous
-                            </button>`;
-                }
-                
-                html += `<div style="padding: 12px 24px; background: rgba(255,255,255,0.1); border-radius: 10px; font-weight: 600; backdrop-filter: blur(10px);">
-                            Page ${currentPage} of ${totalPages}
-                         </div>`;
-                
-                if (currentPage < totalPages) {
-                    html += `<button onclick="changePage(${currentPage + 1})" 
-                                    style="padding: 12px 24px; background: var(--primary-gradient); border: none; border-radius: 10px; color: white; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 600; transition: all 0.3s ease;">
-                                Next <i class="fas fa-chevron-right"></i>
-                            </button>`;
-                }
-                
-                html += '</div>';
-                paginationDiv.innerHTML = html;
-                
-                // Add hover effects to pagination buttons
-                paginationDiv.querySelectorAll('button').forEach(btn => {
-                    btn.addEventListener('mouseenter', () => {
-                        btn.style.transform = 'translateY(-3px)';
-                        btn.style.boxShadow = '0 10px 20px rgba(102, 126, 234, 0.3)';
-                    });
-                    btn.addEventListener('mouseleave', () => {
-                        btn.style.transform = 'translateY(0)';
-                        btn.style.boxShadow = 'none';
-                    });
-                });
-            }
-
-            // Change page
-            window.changePage = async function(page) {
-                if (page < 1 || page > totalPages) return;
-                
-                currentPage = page;
-                showSkeletonLoading();
-                
-                try {
-                    const response = await fetch(`/api/search/${encodeURIComponent(currentSearch)}?page=${page}`);
-                    const data = await response.json();
-                    
-                    if (data.success) {
-                        currentContent = data.results;
-                        displayContent(data.results);
-                        updatePagination(data.pagination);
-                        
-                        // Scroll to top
-                        window.scrollTo({ top: 0, behavior: 'smooth' });
-                    }
-                } catch (error) {
-                    console.error('Page change error:', error);
-                    showError('Failed to load page.');
-                }
-            }
-
-            // Show skeleton loading
-            function showSkeletonLoading() {
-                const grid = document.getElementById('content-grid');
-                grid.innerHTML = `
-                    <div class="skeleton skeleton-card"></div>
-                    <div class="skeleton skeleton-card"></div>
-                    <div class="skeleton skeleton-card"></div>
-                    <div class="skeleton skeleton-card"></div>
-                    <div class="skeleton skeleton-card"></div>
-                    <div class="skeleton skeleton-card"></div>
-                `;
-            }
-
-            // Show modal loading
-            function showModalLoading() {
-                const modalBody = document.getElementById('modal-body');
-                modalBody.innerHTML = `
-                    <div style="text-align: center; padding: 4rem;">
-                        <div class="loading-ring" style="margin: 0 auto 2rem;"></div>
-                        <div style="color: var(--text-secondary); font-size: 1.1rem;">Loading details...</div>
-                    </div>
-                `;
-            }
-
-            // Show error message
+            
+            // Show error
             function showError(message) {
-                const grid = document.getElementById('content-grid');
-                grid.innerHTML = `
-                    <div style="grid-column: 1/-1; text-align: center; padding: 4rem;">
-                        <div style="font-size: 4rem; color: var(--danger); margin-bottom: 1rem;">
-                            <i class="fas fa-exclamation-triangle"></i>
-                        </div>
-                        <h3 style="color: var(--text-primary); margin-bottom: 1rem;">Oops!</h3>
-                        <p style="color: var(--text-secondary);">${message}</p>
+                contentRows.innerHTML = `
+                    <div style="text-align: center; padding: 4rem; color: var(--text-secondary);">
+                        <i class="fas fa-exclamation-triangle" style="font-size: 3rem; margin-bottom: 1rem;"></i>
+                        <h3>${message}</h3>
                         <button onclick="window.location.reload()" 
-                                style="margin-top: 2rem; padding: 12px 24px; background: var(--primary-gradient); border: none; border-radius: 10px; color: white; cursor: pointer; font-weight: 600; transition: all 0.3s ease;">
-                            <i class="fas fa-redo"></i> Try Again
+                                style="margin-top: 2rem; padding: 10px 20px; 
+                                       background: var(--accent-gradient); 
+                                       border: none; border-radius: 5px; 
+                                       color: white; cursor: pointer;">
+                            Try Again
                         </button>
                     </div>
                 `;
-            }
-
-            // Show modal error
-            function showModalError(message) {
-                const modalBody = document.getElementById('modal-body');
-                modalBody.innerHTML = `
-                    <div style="text-align: center; padding: 4rem;">
-                        <div style="font-size: 4rem; color: var(--danger); margin-bottom: 1rem;">
-                            <i class="fas fa-exclamation-triangle"></i>
-                        </div>
-                        <h3 style="color: var(--text-primary); margin-bottom: 1rem;">Something went wrong</h3>
-                        <p style="color: var(--text-secondary); margin-bottom: 2rem;">${message}</p>
-                        <button onclick="closeModal()" 
-                                style="padding: 12px 24px; background: var(--primary-gradient); border: none; border-radius: 10px; color: white; cursor: pointer; font-weight: 600;">
-                            <i class="fas fa-times"></i> Close
-                        </button>
-                    </div>
-                `;
-            }
-
-            // Show notification
-            function showNotification(message, type = 'info') {
-                // Create notification element
-                const notification = document.createElement('div');
-                notification.style.cssText = `
-                    position: fixed;
-                    top: 20px;
-                    right: 20px;
-                    padding: 15px 25px;
-                    background: ${type === 'success' ? 'var(--primary-gradient)' : type === 'error' ? 'var(--secondary-gradient)' : 'var(--accent-gradient)'};
-                    color: white;
-                    border-radius: 10px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-                    z-index: 1000;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                    animation: slideInRight 0.3s ease;
-                    backdrop-filter: blur(10px);
-                    border: 1px solid rgba(255,255,255,0.2);
-                    max-width: 400px;
-                `;
-                
-                notification.innerHTML = `
-                    <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'error' ? 'exclamation-circle' : 'info-circle'}"></i>
-                    <span>${message}</span>
-                `;
-                
-                document.body.appendChild(notification);
-                
-                // Remove notification after 3 seconds
-                setTimeout(() => {
-                    notification.style.animation = 'slideOutRight 0.3s ease';
-                    setTimeout(() => {
-                        if (notification.parentNode) {
-                            notification.parentNode.removeChild(notification);
-                        }
-                    }, 300);
-                }, 3000);
-                
-                // Add CSS for animations
-                if (!document.querySelector('#notification-styles')) {
-                    const style = document.createElement('style');
-                    style.id = 'notification-styles';
-                    style.textContent = `
-                        @keyframes slideInRight {
-                            from { transform: translateX(100%); opacity: 0; }
-                            to { transform: translateX(0); opacity: 1; }
-                        }
-                        @keyframes slideOutRight {
-                            from { transform: translateX(0); opacity: 1; }
-                            to { transform: translateX(100%); opacity: 0; }
-                        }
-                    `;
-                    document.head.appendChild(style);
-                }
-            }
-
-            // Close modal
-            function closeModal() {
-                const modal = document.getElementById('detail-modal');
-                const videoPlayer = document.querySelector('#video-player');
-                
-                if (videoPlayer) {
-                    videoPlayer.pause();
-                    videoPlayer.src = '';
-                }
-                
-                modal.style.display = 'none';
-                document.body.style.overflow = 'auto';
-                
-                // Reset selections
-                selectedEpisodes.clear();
-                selectedSeason = null;
-            }
-
-            // PWA Initialization
-            function initializePWA() {
-                // Service Worker Registration
-                if ('serviceWorker' in navigator) {
-                    navigator.serviceWorker.register('/sw.js')
-                        .then(registration => {
-                            console.log('Service Worker registered:', registration);
-                        })
-                        .catch(error => {
-                            console.error('Service Worker registration failed:', error);
-                        });
-                }
-                
-                // Install Prompt
-                window.addEventListener('beforeinstallprompt', (e) => {
-                    e.preventDefault();
-                    deferredPrompt = e;
-                    
-                    // Show install prompt after 8 seconds
-                    setTimeout(() => {
-                        const installPrompt = document.getElementById('install-prompt');
-                        if (installPrompt && !localStorage.getItem('installPromptDismissed')) {
-                            installPrompt.style.display = 'flex';
-                        }
-                    }, 8000);
-                });
-                
-                // Install button
-                const installBtn = document.getElementById('install-btn');
-                if (installBtn) {
-                    installBtn.addEventListener('click', async () => {
-                        if (deferredPrompt) {
-                            deferredPrompt.prompt();
-                            const { outcome } = await deferredPrompt.userChoice;
-                            if (outcome === 'accepted') {
-                                document.getElementById('install-prompt').style.display = 'none';
-                            }
-                            deferredPrompt = null;
-                        }
-                    });
-                }
-                
-                // Close install prompt
-                const closeInstall = document.getElementById('close-install');
-                if (closeInstall) {
-                    closeInstall.addEventListener('click', () => {
-                        document.getElementById('install-prompt').style.display = 'none';
-                        localStorage.setItem('installPromptDismissed', 'true');
-                    });
-                }
-                
-                // Detect if app is running as PWA
-                if (window.matchMedia('(display-mode: standalone)').matches) {
-                    console.log('Running as PWA');
-                }
             }
         </script>
     </body>
@@ -2580,115 +2106,112 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Service Worker (unchanged from previous version)
+// ====================
+// ADDITIONAL ROUTES
+// ====================
+
+// Search results page
+app.get('/search.html', (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Search Results - STREAMFLIX</title>
+        <style>
+            body { 
+                background: #0a0a1a; 
+                color: white; 
+                font-family: 'Poppins', sans-serif;
+                padding: 2rem;
+            }
+            .back-btn { 
+                margin-bottom: 2rem; 
+                padding: 10px 20px;
+                background: #667eea;
+                border: none;
+                border-radius: 5px;
+                color: white;
+                cursor: pointer;
+            }
+        </style>
+    </head>
+    <body>
+        <button class="back-btn" onclick="window.history.back()">← Back</button>
+        <h1>Search Results</h1>
+        <div id="results"></div>
+        
+        <script>
+            const params = new URLSearchParams(window.location.search);
+            const query = params.get('q');
+            
+            if (query) {
+                document.title = 'Search: ' + query + ' - STREAMFLIX';
+                document.querySelector('h1').textContent = 'Search: ' + query;
+                
+                // Load search results
+                fetch('/api/search/' + encodeURIComponent(query))
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success && data.results.length > 0) {
+                            const resultsHTML = data.results.map(item => \`
+                                <div style="margin: 1rem 0; padding: 1rem; background: #141430; border-radius: 10px;">
+                                    <h3>\${item.title}</h3>
+                                    <p>\${item.year} • \${item.type}</p>
+                                </div>
+                            \`).join('');
+                            
+                            document.getElementById('results').innerHTML = resultsHTML;
+                        } else {
+                            document.getElementById('results').innerHTML = '<p>No results found.</p>';
+                        }
+                    });
+            }
+        </script>
+    </body>
+    </html>
+    `);
+});
+
+// Service Worker
 app.get('/sw.js', (req, res) => {
     res.set('Content-Type', 'application/javascript');
     res.send(`
-        const CACHE_NAME = 'cloud-movies-v1';
-        
-        const urlsToCache = [
-            '/',
-            '/manifest.json'
-        ];
+        const CACHE_NAME = 'streamflix-v1';
         
         self.addEventListener('install', event => {
             event.waitUntil(
                 caches.open(CACHE_NAME)
-                    .then(cache => {
-                        console.log('Opened cache');
-                        return cache.addAll(urlsToCache);
-                    })
-            );
-        });
-        
-        self.addEventListener('activate', event => {
-            event.waitUntil(
-                caches.keys().then(cacheNames => {
-                    return Promise.all(
-                        cacheNames.map(cacheName => {
-                            if (cacheName !== CACHE_NAME) {
-                                console.log('Deleting old cache:', cacheName);
-                                return caches.delete(cacheName);
-                            }
-                        })
-                    );
-                })
+                    .then(cache => cache.addAll(['/']))
             );
         });
         
         self.addEventListener('fetch', event => {
-            if (event.request.method !== 'GET' || event.request.url.startsWith('chrome-extension://')) {
-                return;
-            }
-            
             event.respondWith(
                 caches.match(event.request)
-                    .then(response => {
-                        if (response) {
-                            return response;
-                        }
-                        
-                        const fetchRequest = event.request.clone();
-                        
-                        return fetch(fetchRequest).then(response => {
-                            if (!response || response.status !== 200 || response.type !== 'basic') {
-                                return response;
-                            }
-                            
-                            const responseToCache = response.clone();
-                            
-                            caches.open(CACHE_NAME)
-                                .then(cache => {
-                                    cache.put(event.request, responseToCache);
-                                });
-                            
-                            return response;
-                        }).catch(error => {
-                            console.error('Fetch failed:', error);
-                            return caches.match('/');
-                        });
-                    })
+                    .then(response => response || fetch(event.request))
             );
         });
     `);
 });
 
-// Manifest (updated)
+// Manifest
 app.get('/manifest.json', (req, res) => {
     res.json({
-        "name": "CLOUD.MOVIES | Premium Streaming",
-        "short_name": "CloudMovies",
-        "description": "Premium movie and series streaming platform",
+        "name": "STREAMFLIX",
+        "short_name": "Streamflix",
+        "description": "Premium streaming service",
         "start_url": "/",
         "display": "standalone",
         "background_color": "#0a0a1a",
         "theme_color": "#667eea",
-        "orientation": "portrait",
-        "icons": [
-            {
-                "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' fill='%23667eea'>🎬</text></svg>",
-                "sizes": "any",
-                "type": "image/svg+xml",
-                "purpose": "any maskable"
-            }
-        ],
-        "categories": ["entertainment", "movies", "video"],
-        "shortcuts": [
-            {
-                "name": "Search Content",
-                "short_name": "Search",
-                "description": "Search for movies and TV series",
-                "url": "/?search",
-                "icons": [{ "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90' fill='%23667eea'>🔍</text></svg>", "sizes": "96x96" }]
-            }
-        ]
+        "icons": []
     });
 });
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`🚀 CLOUD.MOVIES server running on port ${PORT}`);
-    console.log(`📱 Developed by Bruce Bera - Bera Tech Solutions`);
+    console.log(`🚀 STREAMFLIX server running on port ${PORT}`);
+    console.log(`📱 Developed by Bruce Bera`);
     console.log(`📞 Contact: wa.me/254743983206`);
     console.log(`🌐 Open http://localhost:${PORT} in your browser`);
 });
