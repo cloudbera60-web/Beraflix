@@ -20,7 +20,30 @@
     "cheerio": "^1.0.0-rc.12",
     "memory-cache": "^0.2.0",
     "node-cache": "^5.1.2",
-    "cookie-parser": "^1.4.6"
+    "cookie-parser": "^1.4.6",
+    
+    // New Dependencies for MongoDB & Authentication
+    "mongoose": "^7.5.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "dotenv": "^16.3.1",
+    
+    // Additional Utilities
+    "express-validator": "^7.0.1",
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.33.1",
+    "winston": "^3.11.0",
+    "nodemailer": "^6.9.7",
+    "uuid": "^9.0.1",
+    "lodash": "^4.17.21",
+    "moment": "^2.29.4",
+    "socket.io": "^4.7.2",
+    "redis": "^4.6.10",
+    "compression-webpack-plugin": "^10.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "eslint": "^8.51.0"
   },
   "engines": {
     "node": ">=18.0.0"
