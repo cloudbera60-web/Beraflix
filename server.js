@@ -6,22 +6,23 @@ const morgan = require('morgan');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const NodeCache = require('node-cache');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // MongoDB Connection
-mongoose.connect('mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/movie_streaming?retryWrites=true&w=majority&appName=Cluster0', {
+mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://ellyongiro8:QwXDXE6tyrGpUTNb@cluster0.tyxcmm9.mongodb.net/berafix?retryWrites=true&w=majority&appName=Cluster0', {
     useNewUrlParser: true,
     useUnifiedTopology: true
 });
 
 // Database Models
-const User = mongoose.model('User', new mongoose.Schema({
-    username: { type: String, unique: true },
-    email: { type: String, unique: true },
-    password: String,
+const userSchema = new mongoose.Schema({
+    username: { type: String, unique: true, required: true },
+    email: { type: String, unique: true, required: true },
+    password: { type: String, required: true },
     profilePic: { type: String, default: '' },
     watchHistory: [{
         contentId: String,
@@ -32,7 +33,8 @@ const User = mongoose.model('User', new mongoose.Schema({
         position: Number,
         duration: Number,
         watchedAt: { type: Date, default: Date.now },
-        thumbnail: String
+        thumbnail: String,
+        progress: Number // 0-100 percentage
     }],
     watchlist: [{
         contentId: String,
@@ -45,10 +47,17 @@ const User = mongoose.model('User', new mongoose.Schema({
         autoPlay: { type: Boolean, default: true },
         defaultQuality: { type: String, default: '720p' },
         language: { type: String, default: 'en' },
-        notifications: { type: Boolean, default: true }
+        notifications: { type: Boolean, default: true },
+        theme: { type: String, default: 'dark' }
     },
-    createdAt: { type: Date, default: Date.now }
-}));
+    createdAt: { type: Date, default: Date.now },
+    lastLogin: { type: Date, default: Date.now }
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Cache for better performance
+const cache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 
 // API Base URL
 const API_BASE = 'https://movieapi.giftedtech.co.ke/api';
@@ -60,30 +69,14 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files
-app.use(express.static('public'));
-
-// Cache for trending content
-let trendingCache = { data: null, timestamp: 0 };
-const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
-
-// Featured content (curated list)
-const FEATURED_CONTENT = [
-    { id: 'featured-action', query: 'action', title: 'Action Blockbusters' },
-    { id: 'featured-comedy', query: 'comedy', title: 'Laugh Out Loud' },
-    { id: 'featured-scifi', query: 'sci-fi', title: 'Sci-Fi Adventures' },
-    { id: 'featured-drama', query: 'drama', title: 'Critically Acclaimed' },
-    { id: 'featured-2024', query: '2024', title: 'New Releases' }
-];
-
 // Authentication middleware
 const authenticateToken = async (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
     if (!token) return next();
     
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'movie-streaming-secret');
-        req.user = await User.findById(decoded.userId);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'berafix-secret-key-2024');
+        req.user = await User.findById(decoded.userId).select('-password');
         next();
     } catch (err) {
         next();
@@ -99,7 +92,13 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, email, password } = req.body;
         
-        // Check if user exists
+        if (!username || !email || !password) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'All fields are required' 
+            });
+        }
+        
         const existingUser = await User.findOne({ $or: [{ email }, { username }] });
         if (existingUser) {
             return res.status(400).json({ 
@@ -108,28 +107,19 @@ app.post('/api/auth/register', async (req, res) => {
             });
         }
         
-        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        // Create user
         const user = new User({
             username,
             email,
-            password: hashedPassword,
-            preferences: {
-                autoPlay: true,
-                defaultQuality: '720p',
-                language: 'en',
-                notifications: true
-            }
+            password: hashedPassword
         });
         
         await user.save();
         
-        // Create token
         const token = jwt.sign(
             { userId: user._id, username: user.username },
-            process.env.JWT_SECRET || 'movie-streaming-secret',
+            process.env.JWT_SECRET || 'berafix-secret-key-2024',
             { expiresIn: '30d' }
         );
         
@@ -155,7 +145,13 @@ app.post('/api/auth/login', async (req, res) => {
     try {
         const { username, password } = req.body;
         
-        // Find user
+        if (!username || !password) {
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Username and password are required' 
+            });
+        }
+        
         const user = await User.findOne({ 
             $or: [{ email: username }, { username: username }] 
         });
@@ -167,7 +163,6 @@ app.post('/api/auth/login', async (req, res) => {
             });
         }
         
-        // Check password
         const validPassword = await bcrypt.compare(password, user.password);
         if (!validPassword) {
             return res.status(401).json({ 
@@ -176,10 +171,13 @@ app.post('/api/auth/login', async (req, res) => {
             });
         }
         
-        // Create token
+        // Update last login
+        user.lastLogin = new Date();
+        await user.save();
+        
         const token = jwt.sign(
             { userId: user._id, username: user.username },
-            process.env.JWT_SECRET || 'movie-streaming-secret',
+            process.env.JWT_SECRET || 'berafix-secret-key-2024',
             { expiresIn: '30d' }
         );
         
@@ -191,7 +189,9 @@ app.post('/api/auth/login', async (req, res) => {
                 username: user.username,
                 email: user.email,
                 profilePic: user.profilePic,
-                preferences: user.preferences
+                preferences: user.preferences,
+                watchlistCount: user.watchlist.length,
+                historyCount: user.watchHistory.length
             }
         });
     } catch (error) {
@@ -208,15 +208,7 @@ app.get('/api/user/profile', authenticateToken, async (req, res) => {
     
     res.json({
         success: true,
-        user: {
-            id: req.user._id,
-            username: req.user.username,
-            email: req.user.email,
-            profilePic: req.user.profilePic,
-            preferences: req.user.preferences,
-            watchlistCount: req.user.watchlist.length,
-            historyCount: req.user.watchHistory.length
-        }
+        user: req.user
     });
 });
 
@@ -229,11 +221,17 @@ app.post('/api/user/history', authenticateToken, async (req, res) => {
     try {
         const { contentId, title, type, season, episode, position, duration, thumbnail } = req.body;
         
+        if (!contentId || !title) {
+            return res.status(400).json({ success: false, message: 'Content ID and title are required' });
+        }
+        
+        const progress = duration ? Math.round((position / duration) * 100) : 0;
+        
         // Remove existing entry if exists
         req.user.watchHistory = req.user.watchHistory.filter(
             item => !(item.contentId === contentId && 
-                     item.season === season && 
-                     item.episode === episode)
+                     item.season === (season || 0) && 
+                     item.episode === (episode || 0))
         );
         
         // Add new entry at beginning
@@ -246,6 +244,7 @@ app.post('/api/user/history', authenticateToken, async (req, res) => {
             position,
             duration,
             thumbnail,
+            progress,
             watchedAt: new Date()
         });
         
@@ -266,7 +265,7 @@ app.post('/api/user/history', authenticateToken, async (req, res) => {
 // Get watch history
 app.get('/api/user/history', authenticateToken, async (req, res) => {
     if (!req.user) {
-        return res.json({ success: true, history: [] });
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
     
     res.json({
@@ -284,8 +283,11 @@ app.post('/api/user/watchlist', authenticateToken, async (req, res) => {
     try {
         const { contentId, title, type, thumbnail, action = 'add' } = req.body;
         
+        if (!contentId || !title) {
+            return res.status(400).json({ success: false, message: 'Content ID and title are required' });
+        }
+        
         if (action === 'add') {
-            // Check if already in watchlist
             const exists = req.user.watchlist.some(item => item.contentId === contentId);
             if (!exists) {
                 req.user.watchlist.unshift({
@@ -316,7 +318,7 @@ app.post('/api/user/watchlist', authenticateToken, async (req, res) => {
 // Get watchlist
 app.get('/api/user/watchlist', authenticateToken, async (req, res) => {
     if (!req.user) {
-        return res.json({ success: true, watchlist: [] });
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
     
     res.json({
@@ -325,128 +327,39 @@ app.get('/api/user/watchlist', authenticateToken, async (req, res) => {
     });
 });
 
-// Update preferences
-app.put('/api/user/preferences', authenticateToken, async (req, res) => {
+// Clear watch history
+app.delete('/api/user/history', authenticateToken, async (req, res) => {
     if (!req.user) {
         return res.status(401).json({ success: false, message: 'Not authenticated' });
     }
     
     try {
-        const { preferences } = req.body;
+        req.user.watchHistory = [];
+        await req.user.save();
         
-        if (preferences) {
-            req.user.preferences = { ...req.user.preferences, ...preferences };
-            await req.user.save();
-        }
-        
-        res.json({ success: true, preferences: req.user.preferences });
+        res.json({ success: true, message: 'History cleared' });
     } catch (error) {
-        console.error('Preferences error:', error);
-        res.status(500).json({ success: false, message: 'Failed to update preferences' });
+        console.error('Clear history error:', error);
+        res.status(500).json({ success: false, message: 'Failed to clear history' });
     }
 });
 
 // ====================
-// CONTENT ENDPOINTS
+// ENHANCED CONTENT ENDPOINTS
 // ====================
 
-// Featured content (curated)
-app.get('/api/featured/:category', async (req, res) => {
-    try {
-        const { category } = req.params;
-        const { limit = 20 } = req.query;
-        
-        const featured = FEATURED_CONTENT.find(f => f.id === category);
-        if (!featured) {
-            return res.status(404).json({ success: false, message: 'Category not found' });
-        }
-        
-        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(featured.query)}`);
-        const data = await response.json();
-        
-        if (data.results && data.results.items) {
-            const items = data.results.items.slice(0, limit).map(item => ({
-                id: item.subjectId,
-                title: item.title,
-                description: item.description,
-                year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
-                type: item.subjectType === 1 ? 'movie' : 'tv',
-                cover: item.cover?.url || item.thumbnail,
-                poster: item.cover?.url || item.thumbnail,
-                backdrop: item.stills?.url || item.cover?.url,
-                genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
-                duration: item.duration,
-                rating: item.imdbRatingValue,
-                releaseDate: item.releaseDate,
-                country: item.countryName
-            }));
-            
-            res.json({
-                success: true,
-                category: featured.title,
-                results: items
-            });
-        } else {
-            res.json({ success: true, category: featured.title, results: [] });
-        }
-    } catch (error) {
-        console.error('Featured error:', error);
-        res.status(500).json({ success: false, error: 'Failed to fetch featured content' });
-    }
-});
-
-// Get all featured categories
-app.get('/api/featured', async (req, res) => {
-    try {
-        const categories = await Promise.all(
-            FEATURED_CONTENT.map(async (featured) => {
-                try {
-                    const response = await fetch(`${API_BASE}/search/${encodeURIComponent(featured.query)}`);
-                    const data = await response.json();
-                    
-                    if (data.results && data.results.items) {
-                        const items = data.results.items.slice(0, 10).map(item => ({
-                            id: item.subjectId,
-                            title: item.title,
-                            type: item.subjectType === 1 ? 'movie' : 'tv',
-                            cover: item.cover?.url || item.thumbnail,
-                            rating: item.imdbRatingValue
-                        }));
-                        
-                        return {
-                            id: featured.id,
-                            title: featured.title,
-                            query: featured.query,
-                            items: items
-                        };
-                    }
-                } catch (err) {
-                    console.error(`Error fetching ${featured.title}:`, err);
-                }
-                return {
-                    id: featured.id,
-                    title: featured.title,
-                    query: featured.query,
-                    items: []
-                };
-            })
-        );
-        
-        res.json({
-            success: true,
-            categories: categories.filter(cat => cat.items.length > 0)
-        });
-    } catch (error) {
-        console.error('Featured categories error:', error);
-        res.status(500).json({ success: false, error: 'Failed to fetch featured categories' });
-    }
-});
-
-// Search endpoint (enhanced)
+// Enhanced search with caching and filters
 app.get('/api/search/:query', async (req, res) => {
     try {
         const { query } = req.params;
-        const { page = '1', type, year, genre } = req.query;
+        const { page = '1', type, year, genre, sort = 'relevance' } = req.query;
+        
+        const cacheKey = `search_${query}_${page}_${type}_${year}_${genre}_${sort}`;
+        const cached = cache.get(cacheKey);
+        
+        if (cached) {
+            return res.json(cached);
+        }
         
         const response = await fetch(`${API_BASE}/search/${encodeURIComponent(query)}`);
         const data = await response.json();
@@ -463,19 +376,18 @@ app.get('/api/search/:query', async (req, res) => {
                 backdrop: item.stills?.url || item.cover?.url,
                 genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
                 duration: item.duration,
-                rating: item.imdbRatingValue,
+                rating: item.imdbRatingValue ? parseFloat(item.imdbRatingValue) : null,
                 releaseDate: item.releaseDate,
                 country: item.countryName,
-                hasResource: item.hasResource
+                hasResource: item.hasResource,
+                popularity: item.imdbRatingCount ? parseInt(item.imdbRatingCount) : 0
             }));
             
             // Apply filters
-            if (type) {
-                const targetType = type === 'movie' ? 1 : 2;
-                items = items.filter(item => 
-                    (type === 'movie' && item.type === 'movie') || 
-                    (type === 'tv' && item.type === 'tv')
-                );
+            if (type === 'movie') {
+                items = items.filter(item => item.type === 'movie');
+            } else if (type === 'tv') {
+                items = items.filter(item => item.type === 'tv');
             }
             
             if (year) {
@@ -490,17 +402,30 @@ app.get('/api/search/:query', async (req, res) => {
                 );
             }
             
-            res.json({
+            // Apply sorting
+            if (sort === 'rating') {
+                items.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+            } else if (sort === 'year') {
+                items.sort((a, b) => parseInt(b.year || 0) - parseInt(a.year || 0));
+            } else if (sort === 'popularity') {
+                items.sort((a, b) => b.popularity - a.popularity);
+            }
+            
+            const result = {
                 success: true,
                 query: query,
-                filters: { type, year, genre },
+                filters: { type, year, genre, sort },
                 results: items,
                 pagination: data.results.pager || {
                     page: parseInt(page),
                     totalPages: Math.ceil((data.results.pager?.totalCount || 0) / 24),
-                    hasMore: data.results.pager?.hasMore || false
+                    hasMore: data.results.pager?.hasMore || false,
+                    totalResults: data.results.pager?.totalCount || items.length
                 }
-            });
+            };
+            
+            cache.set(cacheKey, result);
+            res.json(result);
         } else {
             res.json({ 
                 success: true, 
@@ -514,63 +439,66 @@ app.get('/api/search/:query', async (req, res) => {
     }
 });
 
-// Get trending content (improved)
+// Smart trending content (no more hardcoded Avengers)
 app.get('/api/trending', async (req, res) => {
     try {
-        const now = Date.now();
-        if (trendingCache.data && (now - trendingCache.timestamp) < CACHE_DURATION) {
-            return res.json(trendingCache.data);
+        const cacheKey = 'trending_content';
+        const cached = cache.get(cacheKey);
+        
+        if (cached) {
+            return res.json(cached);
         }
         
-        // Better trending algorithm
+        // Smart trending queries based on current trends
         const trendingQueries = [
-            '2024', 'new', 'latest', 'movie', 
-            'series', 'action', 'comedy', 'drama'
+            '2024',
+            'new',
+            'popular',
+            'netflix',
+            'action',
+            'comedy',
+            'drama',
+            'movie',
+            'series'
         ];
         
-        // Get current day of month for rotation
-        const dayOfMonth = new Date().getDate();
-        const queryIndex = dayOfMonth % trendingQueries.length;
-        const trendingQuery = trendingQueries[queryIndex];
+        // Get random query for variety
+        const randomQuery = trendingQueries[Math.floor(Math.random() * trendingQueries.length)];
         
-        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(trendingQuery)}`);
+        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(randomQuery)}`);
         const data = await response.json();
         
         if (data.results && data.results.items) {
-            // Sort by rating if available
-            const sortedItems = data.results.items
-                .filter(item => item.imdbRatingValue)
+            // Sort by rating and filter quality content
+            const items = data.results.items
+                .filter(item => item.imdbRatingValue && parseFloat(item.imdbRatingValue) > 6.0)
                 .sort((a, b) => parseFloat(b.imdbRatingValue) - parseFloat(a.imdbRatingValue))
-                .slice(0, 20);
-            
-            // Fallback to first 20 items if no ratings
-            const items = sortedItems.length > 0 ? sortedItems : data.results.items.slice(0, 20);
-            
-            const processedItems = items.map(item => ({
-                id: item.subjectId,
-                title: item.title,
-                description: item.description,
-                year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
-                type: item.subjectType === 1 ? 'movie' : 'tv',
-                cover: item.cover?.url || item.thumbnail,
-                poster: item.cover?.url || item.thumbnail,
-                backdrop: item.stills?.url || item.cover?.url,
-                genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
-                duration: item.duration,
-                rating: item.imdbRatingValue,
-                releaseDate: item.releaseDate,
-                country: item.countryName,
-                trendingScore: parseFloat(item.imdbRatingValue) || 0
-            }));
+                .slice(0, 20)
+                .map(item => ({
+                    id: item.subjectId,
+                    title: item.title,
+                    description: item.description,
+                    year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
+                    type: item.subjectType === 1 ? 'movie' : 'tv',
+                    cover: item.cover?.url || item.thumbnail,
+                    poster: item.cover?.url || item.thumbnail,
+                    backdrop: item.stills?.url || item.cover?.url,
+                    genre: item.genre ? item.genre.split(',').map(g => g.trim()) : [],
+                    duration: item.duration,
+                    rating: item.imdbRatingValue,
+                    releaseDate: item.releaseDate,
+                    country: item.countryName,
+                    trendingScore: parseFloat(item.imdbRatingValue) || 0
+                }));
             
             const result = {
                 success: true,
-                query: trendingQuery,
-                results: processedItems,
-                timestamp: now
+                category: 'Trending Now',
+                results: items,
+                timestamp: Date.now()
             };
             
-            trendingCache = { data: result, timestamp: now };
+            cache.set(cacheKey, result, 300); // Cache for 5 minutes
             res.json(result);
         } else {
             res.json({ success: true, results: [] });
@@ -581,10 +509,227 @@ app.get('/api/trending', async (req, res) => {
     }
 });
 
-// Info endpoint (unchanged but optimized)
+// Get content by genre/category
+app.get('/api/category/:category', async (req, res) => {
+    try {
+        const { category } = req.params;
+        const { limit = 20 } = req.query;
+        
+        const cacheKey = `category_${category}_${limit}`;
+        const cached = cache.get(cacheKey);
+        
+        if (cached) {
+            return res.json(cached);
+        }
+        
+        const categoryMap = {
+            'action': ['action', 'adventure', 'thriller'],
+            'comedy': ['comedy', 'romance'],
+            'drama': ['drama', 'romance'],
+            'horror': ['horror', 'thriller'],
+            'scifi': ['sci-fi', 'fantasy'],
+            'animation': ['animation', 'family'],
+            'popular': ['2024', 'popular'],
+            'new': ['2024', 'new']
+        };
+        
+        const searchTerms = categoryMap[category] || [category];
+        const randomTerm = searchTerms[Math.floor(Math.random() * searchTerms.length)];
+        
+        const response = await fetch(`${API_BASE}/search/${encodeURIComponent(randomTerm)}`);
+        const data = await response.json();
+        
+        if (data.results && data.results.items) {
+            const items = data.results.items.slice(0, limit).map(item => ({
+                id: item.subjectId,
+                title: item.title,
+                year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A',
+                type: item.subjectType === 1 ? 'movie' : 'tv',
+                cover: item.cover?.url || item.thumbnail,
+                poster: item.cover?.url || item.thumbnail,
+                rating: item.imdbRatingValue,
+                genre: item.genre ? item.genre.split(',').map(g => g.trim()) : []
+            }));
+            
+            const result = {
+                success: true,
+                category: category.charAt(0).toUpperCase() + category.slice(1),
+                results: items
+            };
+            
+            cache.set(cacheKey, result, 600); // Cache for 10 minutes
+            res.json(result);
+        } else {
+            res.json({ success: true, category: category, results: [] });
+        }
+    } catch (error) {
+        console.error('Category error:', error);
+        res.status(500).json({ success: false, error: 'Failed to fetch category content' });
+    }
+});
+
+// Get multiple categories for Netflix-style homepage
+app.get('/api/homepage', async (req, res) => {
+    try {
+        const cacheKey = 'homepage_data';
+        const cached = cache.get(cacheKey);
+        
+        if (cached) {
+            return res.json(cached);
+        }
+        
+        const categories = [
+            { id: 'trending', title: 'Trending Now', query: 'popular', icon: '🔥' },
+            { id: 'action', title: 'Action & Adventure', query: 'action', icon: '💥' },
+            { id: 'comedy', title: 'Comedies', query: 'comedy', icon: '😂' },
+            { id: 'drama', title: 'Dramas', query: 'drama', icon: '🎭' },
+            { id: 'scifi', title: 'Sci-Fi & Fantasy', query: 'sci-fi', icon: '🚀' },
+            { id: 'new', title: 'New Releases', query: '2024', icon: '🆕' },
+            { id: 'popular', title: 'Popular on BeraFix', query: 'movie', icon: '⭐' }
+        ];
+        
+        const categoryPromises = categories.map(async (category) => {
+            try {
+                const response = await fetch(`${API_BASE}/search/${encodeURIComponent(category.query)}`);
+                const data = await response.json();
+                
+                if (data.results && data.results.items) {
+                    const items = data.results.items.slice(0, 12).map(item => ({
+                        id: item.subjectId,
+                        title: item.title,
+                        type: item.subjectType === 1 ? 'movie' : 'tv',
+                        cover: item.cover?.url || item.thumbnail,
+                        backdrop: item.stills?.url || item.cover?.url,
+                        rating: item.imdbRatingValue,
+                        year: item.releaseDate ? item.releaseDate.split('-')[0] : 'N/A'
+                    }));
+                    
+                    return {
+                        id: category.id,
+                        title: category.title,
+                        icon: category.icon,
+                        items: items
+                    };
+                }
+            } catch (err) {
+                console.error(`Error fetching ${category.title}:`, err);
+            }
+            return {
+                id: category.id,
+                title: category.title,
+                icon: category.icon,
+                items: []
+            };
+        });
+        
+        const categoryResults = await Promise.all(categoryPromises);
+        
+        // Get featured/hero content (highest rated)
+        const featuredRes = await fetch(`${API_BASE}/search/2024`);
+        const featuredData = await featuredRes.json();
+        
+        let featuredContent = null;
+        if (featuredData.results && featuredData.results.items.length > 0) {
+            const featuredItems = featuredData.results.items
+                .filter(item => item.imdbRatingValue && parseFloat(item.imdbRatingValue) > 7.0)
+                .sort((a, b) => parseFloat(b.imdbRatingValue) - parseFloat(a.imdbRatingValue));
+            
+            if (featuredItems.length > 0) {
+                featuredContent = {
+                    id: featuredItems[0].subjectId,
+                    title: featuredItems[0].title,
+                    description: featuredItems[0].description,
+                    backdrop: featuredItems[0].stills?.url || featuredItems[0].cover?.url,
+                    rating: featuredItems[0].imdbRatingValue,
+                    year: featuredItems[0].releaseDate ? featuredItems[0].releaseDate.split('-')[0] : 'N/A',
+                    type: featuredItems[0].subjectType === 1 ? 'movie' : 'tv'
+                };
+            }
+        }
+        
+        const result = {
+            success: true,
+            featured: featuredContent,
+            categories: categoryResults.filter(cat => cat.items.length > 0),
+            timestamp: Date.now()
+        };
+        
+        cache.set(cacheKey, result, 300); // Cache for 5 minutes
+        res.json(result);
+    } catch (error) {
+        console.error('Homepage error:', error);
+        res.status(500).json({ success: false, error: 'Failed to load homepage' });
+    }
+});
+
+// Get recommendations based on user history
+app.get('/api/recommendations', authenticateToken, async (req, res) => {
+    try {
+        if (!req.user || req.user.watchHistory.length === 0) {
+            // Return popular content for new users
+            const response = await fetch(`${API_BASE}/search/popular`);
+            const data = await response.json();
+            
+            if (data.results && data.results.items) {
+                const items = data.results.items.slice(0, 12).map(item => ({
+                    id: item.subjectId,
+                    title: item.title,
+                    type: item.subjectType === 1 ? 'movie' : 'tv',
+                    cover: item.cover?.url || item.thumbnail,
+                    rating: item.imdbRatingValue
+                }));
+                
+                return res.json({ 
+                    success: true, 
+                    recommendations: items,
+                    message: 'Based on popular content' 
+                });
+            }
+        }
+        
+        // For users with history, recommend based on watched genres
+        const userGenres = new Set();
+        req.user.watchHistory.forEach(item => {
+            // We could get genre from content info, but for now use popular
+        });
+        
+        // For now, return trending content
+        const response = await fetch(`${API_BASE}/search/2024`);
+        const data = await response.json();
+        
+        if (data.results && data.results.items) {
+            const items = data.results.items.slice(0, 12).map(item => ({
+                id: item.subjectId,
+                title: item.title,
+                type: item.subjectType === 1 ? 'movie' : 'tv',
+                cover: item.cover?.url || item.thumbnail,
+                rating: item.imdbRatingValue
+            }));
+            
+            res.json({ 
+                success: true, 
+                recommendations: items,
+                message: 'Recommended for you' 
+            });
+        } else {
+            res.json({ success: true, recommendations: [] });
+        }
+    } catch (error) {
+        console.error('Recommendations error:', error);
+        res.json({ success: true, recommendations: [] });
+    }
+});
+
+// Original API endpoints (unchanged but enhanced)
 app.get('/api/info/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        const cacheKey = `info_${id}`;
+        const cached = cache.get(cacheKey);
+        
+        if (cached) {
+            return res.json(cached);
+        }
         
         const response = await fetch(`${API_BASE}/info/${id}`);
         const data = await response.json();
@@ -620,7 +765,7 @@ app.get('/api/info/:id', async (req, res) => {
                 });
             }
             
-            res.json({
+            const result = {
                 success: true,
                 data: {
                     id: subject.subjectId,
@@ -646,7 +791,10 @@ app.get('/api/info/:id', async (req, res) => {
                     hasResource: subject.hasResource,
                     subtitles: subject.subtitles
                 }
-            });
+            };
+            
+            cache.set(cacheKey, result, 600); // Cache for 10 minutes
+            res.json(result);
         } else {
             res.status(404).json({ success: false, error: 'Content not found' });
         }
@@ -656,7 +804,6 @@ app.get('/api/info/:id', async (req, res) => {
     }
 });
 
-// Sources endpoint (unchanged)
 app.get('/api/sources/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -689,7 +836,6 @@ app.get('/api/sources/:id', async (req, res) => {
     }
 });
 
-// Stream endpoint (enhanced with quality fallback)
 app.get('/api/stream/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -706,7 +852,6 @@ app.get('/api/stream/:id', async (req, res) => {
             return res.status(404).json({ error: 'No sources available' });
         }
         
-        // Quality priority: requested → 720p → 480p → 360p → first available
         const qualityOrder = [quality, '720p', '480p', '360p'];
         let selectedSource = null;
         
@@ -729,828 +874,342 @@ app.get('/api/stream/:id', async (req, res) => {
     }
 });
 
-// Get recommendations (based on watch history)
-app.get('/api/recommendations', authenticateToken, async (req, res) => {
-    try {
-        if (!req.user || req.user.watchHistory.length === 0) {
-            // Return popular content as fallback
-            const response = await fetch(`${API_BASE}/search/movie`);
-            const data = await response.json();
-            
-            if (data.results && data.results.items) {
-                const items = data.results.items.slice(0, 10).map(item => ({
-                    id: item.subjectId,
-                    title: item.title,
-                    type: item.subjectType === 1 ? 'movie' : 'tv',
-                    cover: item.cover?.url || item.thumbnail,
-                    rating: item.imdbRatingValue
-                }));
-                
-                return res.json({ success: true, recommendations: items, source: 'popular' });
-            }
-        }
-        
-        // Get most watched genre
-        const genreCount = {};
-        req.user.watchHistory.forEach(item => {
-            // We'd need genre info from content, for now use popular
-        });
-        
-        // For now, return trending
-        const trendingResponse = await fetch(`${API_BASE}/search/2024`);
-        const trendingData = await trendingResponse.json();
-        
-        if (trendingData.results && trendingData.results.items) {
-            const items = trendingData.results.items.slice(0, 10).map(item => ({
-                id: item.subjectId,
-                title: item.title,
-                type: item.subjectType === 1 ? 'movie' : 'tv',
-                cover: item.cover?.url || item.thumbnail,
-                rating: item.imdbRatingValue
-            }));
-            
-            res.json({ success: true, recommendations: items, source: 'trending' });
-        } else {
-            res.json({ success: true, recommendations: [] });
-        }
-    } catch (error) {
-        console.error('Recommendations error:', error);
-        res.json({ success: true, recommendations: [] });
-    }
-});
-
 // ====================
-// MAIN HTML PAGE
+// ENHANCED FRONTEND
 // ====================
 
 app.get('/', (req, res) => {
-    res.send(`
+    const html = `
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>STREAMFLIX | Premium Entertainment</title>
+        <title>BeraFix | Premium Streaming</title>
         <meta name="description" content="Stream movies and TV series in stunning quality">
-        <meta name="author" content="Bruce Bera">
         
-        <!-- PWA Manifest -->
+        <!-- PWA -->
         <link rel="manifest" href="/manifest.json">
         <meta name="theme-color" content="#0a0a1a">
-        
-        <!-- Icons -->
         <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎬</text></svg>">
         
-        <!-- Font Awesome -->
+        <!-- Fonts & Icons -->
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Montserrat:wght@300;400;600;700&display=swap" rel="stylesheet">
         
-        <!-- Google Fonts -->
-        <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Poppins:wght@300;400;500;600;700&family=Montserrat:wght@300;400;600;700&display=swap" rel="stylesheet">
-        
-        <!-- Styles -->
         <style>
             :root {
-                /* Enhanced Color Scheme */
                 --primary-bg: #0a0a1a;
                 --secondary-bg: #0f0f23;
                 --card-bg: #141430;
                 --accent-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 --accent-red: #e50914;
                 --accent-blue: #667eea;
-                --accent-purple: #764ba2;
-                --accent-pink: #f093fb;
-                --accent-cyan: #00f2fe;
-                
-                /* Text Colors */
                 --text-primary: #ffffff;
                 --text-secondary: #b8c1ec;
-                --text-muted: #8a8d9e;
-                
-                /* Status Colors */
-                --success: #00ff9d;
-                --warning: #ffcc00;
-                --danger: #ff416c;
-                --info: #4facfe;
             }
             
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
             
             body {
                 font-family: 'Poppins', sans-serif;
                 background: var(--primary-bg);
                 color: var(--text-primary);
                 min-height: 100vh;
-                overflow-x: hidden;
             }
             
-            /* Loading Screen - Enhanced */
+            /* Loading Screen */
             #loading-screen {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
+                position: fixed; top: 0; left: 0;
+                width: 100%; height: 100%;
                 background: var(--primary-bg);
-                display: flex;
-                flex-direction: column;
-                justify-content: center;
-                align-items: center;
-                z-index: 9999;
-                transition: opacity 0.5s ease;
+                display: flex; flex-direction: column;
+                justify-content: center; align-items: center;
+                z-index: 9999; transition: opacity 0.5s ease;
             }
             
-            .logo-container {
-                text-align: center;
-                margin-bottom: 3rem;
-            }
-            
-            .logo-text {
-                font-family: 'Orbitron', sans-serif;
-                font-size: 4.5rem;
-                font-weight: 900;
-                text-transform: uppercase;
-                letter-spacing: 4px;
+            .logo { font-size: 4rem; font-weight: 700;
                 background: var(--accent-gradient);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
-                background-size: 300% 300%;
-                animation: gradientShift 3s ease infinite;
-                margin-bottom: 0.5rem;
-            }
+                margin-bottom: 2rem; }
             
-            .logo-tagline {
-                font-size: 1.2rem;
-                color: var(--text-secondary);
-                letter-spacing: 2px;
-                font-weight: 300;
-            }
-            
-            .loading-animation {
-                display: flex;
-                gap: 10px;
-                margin-top: 2rem;
-            }
-            
-            .loading-dot {
-                width: 15px;
-                height: 15px;
-                border-radius: 50%;
-                background: var(--accent-gradient);
-                animation: bounce 1.4s infinite ease-in-out both;
-            }
-            
-            .loading-dot:nth-child(1) { animation-delay: -0.32s; }
-            .loading-dot:nth-child(2) { animation-delay: -0.16s; }
-            
-            @keyframes gradientShift {
-                0% { background-position: 0% 50%; }
-                50% { background-position: 100% 50%; }
-                100% { background-position: 0% 50%; }
-            }
+            .loading-dots { display: flex; gap: 10px; }
+            .dot { width: 15px; height: 15px; border-radius: 50%;
+                background: #667eea; animation: bounce 1.4s infinite; }
+            .dot:nth-child(1) { animation-delay: -0.32s; }
+            .dot:nth-child(2) { animation-delay: -0.16s; }
             
             @keyframes bounce {
                 0%, 80%, 100% { transform: scale(0); }
                 40% { transform: scale(1); }
             }
             
-            /* Header - Enhanced */
+            /* Header */
             header {
-                background: linear-gradient(to bottom, rgba(10, 10, 26, 0.95), transparent);
                 padding: 1.5rem 3rem;
-                position: fixed;
-                top: 0;
-                width: 100%;
-                z-index: 100;
-                transition: all 0.3s ease;
-            }
-            
-            header.scrolled {
+                display: flex; justify-content: space-between;
+                align-items: center;
                 background: rgba(10, 10, 26, 0.95);
                 backdrop-filter: blur(10px);
-                box-shadow: 0 5px 20px rgba(0, 0, 0, 0.3);
+                position: sticky; top: 0; z-index: 100;
             }
             
-            .header-container {
-                max-width: 1400px;
-                margin: 0 auto;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            }
-            
-            .logo {
-                font-family: 'Orbitron', sans-serif;
-                font-size: 2rem;
-                font-weight: 700;
+            .site-logo {
+                font-size: 1.8rem; font-weight: 700;
                 background: var(--accent-gradient);
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
                 text-decoration: none;
-                display: flex;
-                align-items: center;
-                gap: 12px;
+                display: flex; align-items: center; gap: 10px;
             }
             
-            .nav-links {
-                display: flex;
-                gap: 2rem;
-                align-items: center;
+            .search-container {
+                flex: 1; max-width: 600px; margin: 0 2rem;
+                position: relative;
             }
             
-            .nav-link {
-                color: var(--text-secondary);
-                text-decoration: none;
-                font-weight: 500;
-                transition: color 0.3s ease;
-                font-size: 1rem;
-            }
-            
-            .nav-link:hover, .nav-link.active {
-                color: var(--text-primary);
-            }
-            
-            .user-menu {
-                display: flex;
-                align-items: center;
-                gap: 1rem;
-            }
-            
-            .auth-btn {
-                padding: 8px 20px;
-                border-radius: 25px;
-                border: none;
-                font-weight: 600;
-                cursor: pointer;
+            #search-input {
+                width: 100%; padding: 12px 45px 12px 20px;
+                background: rgba(255, 255, 255, 0.1);
+                border: 2px solid transparent; border-radius: 25px;
+                color: white; font-size: 1rem; outline: none;
                 transition: all 0.3s ease;
             }
             
-            .login-btn {
-                background: transparent;
-                color: var(--text-primary);
-                border: 2px solid var(--accent-blue);
+            #search-input:focus {
+                border-color: var(--accent-blue);
+                box-shadow: 0 0 20px rgba(102, 126, 234, 0.3);
             }
             
-            .signup-btn {
-                background: var(--accent-gradient);
-                color: white;
-            }
-            
-            .auth-btn:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(102, 126, 234, 0.3);
+            #search-btn {
+                position: absolute; right: 10px; top: 50%;
+                transform: translateY(-50%); background: none;
+                border: none; color: white; cursor: pointer;
             }
             
             /* Hero Section */
             .hero {
-                height: 80vh;
-                min-height: 600px;
-                position: relative;
-                overflow: hidden;
-                margin-bottom: 4rem;
+                height: 70vh; min-height: 500px;
+                background: linear-gradient(to right, var(--primary-bg) 30%, transparent 70%),
+                            var(--card-bg);
+                display: flex; align-items: center;
+                padding: 0 4rem; margin-bottom: 3rem;
+                position: relative; overflow: hidden;
             }
             
             .hero-backdrop {
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                object-fit: cover;
-                z-index: -1;
-                opacity: 0.3;
+                position: absolute; top: 0; left: 0;
+                width: 100%; height: 100%;
+                object-fit: cover; z-index: -1; opacity: 0.4;
             }
             
-            .hero-content {
-                position: relative;
-                height: 100%;
-                display: flex;
-                align-items: center;
-                padding: 0 4rem;
-                background: linear-gradient(to right, var(--primary-bg) 20%, transparent 70%);
-            }
-            
-            .hero-info {
-                max-width: 600px;
-            }
+            .hero-content { max-width: 600px; z-index: 2; }
             
             .hero-title {
                 font-family: 'Montserrat', sans-serif;
-                font-size: 4rem;
-                font-weight: 800;
-                margin-bottom: 1.5rem;
-                line-height: 1.1;
+                font-size: 3.5rem; font-weight: 800;
+                margin-bottom: 1.5rem; line-height: 1.1;
             }
             
             .hero-description {
-                font-size: 1.2rem;
-                line-height: 1.6;
+                font-size: 1.2rem; line-height: 1.6;
                 color: var(--text-secondary);
                 margin-bottom: 2rem;
             }
             
             .hero-actions {
-                display: flex;
-                gap: 1rem;
-                margin-bottom: 2rem;
+                display: flex; gap: 1rem; margin-bottom: 2rem;
             }
             
             .hero-btn {
-                padding: 15px 35px;
-                border: none;
-                border-radius: 5px;
-                font-size: 1.1rem;
-                font-weight: 600;
-                cursor: pointer;
-                display: flex;
-                align-items: center;
-                gap: 10px;
+                padding: 15px 35px; border: none; border-radius: 5px;
+                font-size: 1.1rem; font-weight: 600; cursor: pointer;
+                display: flex; align-items: center; gap: 10px;
                 transition: all 0.3s ease;
             }
             
-            .play-btn {
-                background: var(--accent-red);
-                color: white;
-            }
+            .play-btn { background: var(--accent-red); color: white; }
+            .info-btn { background: rgba(255, 255, 255, 0.2); color: white; }
             
-            .info-btn {
-                background: rgba(255, 255, 255, 0.2);
-                backdrop-filter: blur(10px);
-                color: white;
-            }
-            
-            .hero-btn:hover {
-                transform: scale(1.05);
-                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
-            }
+            .hero-btn:hover { transform: scale(1.05); }
             
             /* Content Rows */
-            .content-section {
-                padding: 2rem 4rem;
-                max-width: 1400px;
-                margin: 0 auto;
-            }
+            .content-section { padding: 2rem 3rem; }
             
             .section-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 1.5rem;
+                display: flex; justify-content: space-between;
+                align-items: center; margin-bottom: 1.5rem;
             }
             
             .section-title {
-                font-size: 1.8rem;
-                font-weight: 600;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            
-            .section-link {
-                color: var(--accent-blue);
-                text-decoration: none;
-                font-weight: 500;
-                display: flex;
-                align-items: center;
-                gap: 5px;
+                font-size: 1.8rem; font-weight: 600;
+                display: flex; align-items: center; gap: 10px;
             }
             
             .content-row {
-                display: flex;
-                overflow-x: auto;
-                gap: 1rem;
-                padding: 1rem 0;
-                scrollbar-width: thin;
-                scrollbar-color: var(--accent-blue) transparent;
+                display: flex; overflow-x: auto; gap: 1rem;
+                padding: 1rem 0; scrollbar-width: thin;
             }
             
-            .content-row::-webkit-scrollbar {
-                height: 6px;
-            }
+            .content-row::-webkit-scrollbar { height: 6px; }
+            .content-row::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+            .content-row::-webkit-scrollbar-thumb { background: var(--accent-gradient); }
             
-            .content-row::-webkit-scrollbar-track {
-                background: rgba(255, 255, 255, 0.05);
-                border-radius: 3px;
-            }
-            
-            .content-row::-webkit-scrollbar-thumb {
-                background: var(--accent-gradient);
-                border-radius: 3px;
-            }
-            
-            /* Content Card - Enhanced */
+            /* Content Cards */
             .content-card {
-                flex: 0 0 auto;
-                width: 220px;
-                background: var(--card-bg);
-                border-radius: 10px;
-                overflow: hidden;
-                transition: all 0.3s ease;
-                cursor: pointer;
-                position: relative;
+                flex: 0 0 auto; width: 220px;
+                background: var(--card-bg); border-radius: 10px;
+                overflow: hidden; cursor: pointer;
+                transition: transform 0.3s ease; position: relative;
             }
             
-            .content-card:hover {
-                transform: scale(1.05);
-                z-index: 10;
-                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
-            }
+            .content-card:hover { transform: scale(1.05); z-index: 10; }
             
             .card-image {
-                width: 100%;
-                height: 320px;
-                object-fit: cover;
-                transition: transform 0.3s ease;
+                width: 100%; height: 320px;
+                object-fit: cover; transition: transform 0.3s ease;
             }
             
-            .content-card:hover .card-image {
-                transform: scale(1.1);
-            }
+            .content-card:hover .card-image { transform: scale(1.1); }
             
             .card-overlay {
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: linear-gradient(to top, rgba(0, 0, 0, 0.9), transparent 50%);
-                opacity: 0;
-                transition: opacity 0.3s ease;
-                display: flex;
-                flex-direction: column;
-                justify-content: flex-end;
-                padding: 1.5rem;
+                position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+                background: linear-gradient(to top, rgba(0,0,0,0.9), transparent 50%);
+                opacity: 0; transition: opacity 0.3s ease;
+                display: flex; flex-direction: column;
+                justify-content: flex-end; padding: 1.5rem;
             }
             
-            .content-card:hover .card-overlay {
-                opacity: 1;
-            }
+            .content-card:hover .card-overlay { opacity: 1; }
             
-            .card-title {
-                font-size: 1.1rem;
-                font-weight: 600;
-                margin-bottom: 0.5rem;
-            }
+            .card-title { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
             
             .card-meta {
-                display: flex;
-                justify-content: space-between;
-                font-size: 0.9rem;
-                color: var(--text-secondary);
-                margin-bottom: 1rem;
-            }
-            
-            .card-actions {
-                display: flex;
-                gap: 0.5rem;
-            }
-            
-            .card-btn {
-                width: 40px;
-                height: 40px;
-                border-radius: 50%;
-                border: none;
-                background: rgba(255, 255, 255, 0.2);
-                backdrop-filter: blur(10px);
-                color: white;
-                cursor: pointer;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                transition: all 0.3s ease;
-            }
-            
-            .card-btn:hover {
-                background: var(--accent-red);
-                transform: scale(1.1);
+                display: flex; justify-content: space-between;
+                font-size: 0.9rem; color: var(--text-secondary);
             }
             
             /* Auth Modal */
             .auth-modal {
-                display: none;
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background: rgba(0, 0, 0, 0.8);
-                z-index: 1000;
+                display: none; position: fixed; top: 0; left: 0;
+                width: 100%; height: 100%;
+                background: rgba(0,0,0,0.8); z-index: 1000;
                 backdrop-filter: blur(5px);
             }
             
             .auth-content {
-                position: absolute;
-                top: 50%;
-                left: 50%;
+                position: absolute; top: 50%; left: 50%;
                 transform: translate(-50%, -50%);
-                background: var(--secondary-bg);
-                border-radius: 15px;
-                padding: 3rem;
-                width: 90%;
-                max-width: 400px;
-                box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
-            }
-            
-            .auth-tabs {
-                display: flex;
-                margin-bottom: 2rem;
-                border-bottom: 2px solid rgba(255, 255, 255, 0.1);
-            }
-            
-            .auth-tab {
-                flex: 1;
-                padding: 1rem;
-                text-align: center;
-                background: none;
-                border: none;
-                color: var(--text-secondary);
-                font-size: 1.1rem;
-                font-weight: 600;
-                cursor: pointer;
-                transition: color 0.3s ease;
-            }
-            
-            .auth-tab.active {
-                color: var(--text-primary);
-                border-bottom: 3px solid var(--accent-blue);
-            }
-            
-            .auth-form {
-                display: flex;
-                flex-direction: column;
-                gap: 1.5rem;
-            }
-            
-            .form-group {
-                display: flex;
-                flex-direction: column;
-                gap: 0.5rem;
-            }
-            
-            .form-label {
-                color: var(--text-secondary);
-                font-size: 0.9rem;
-            }
-            
-            .form-input {
-                padding: 12px 15px;
-                background: rgba(255, 255, 255, 0.1);
-                border: 2px solid rgba(255, 255, 255, 0.1);
-                border-radius: 8px;
-                color: white;
-                font-size: 1rem;
-                transition: border-color 0.3s ease;
-            }
-            
-            .form-input:focus {
-                outline: none;
-                border-color: var(--accent-blue);
-            }
-            
-            .auth-submit {
-                padding: 15px;
-                background: var(--accent-gradient);
-                border: none;
-                border-radius: 8px;
-                color: white;
-                font-size: 1rem;
-                font-weight: 600;
-                cursor: pointer;
-                transition: all 0.3s ease;
-                margin-top: 1rem;
-            }
-            
-            .auth-submit:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-            }
-            
-            .auth-error {
-                color: var(--danger);
-                font-size: 0.9rem;
-                text-align: center;
-                margin-top: 1rem;
-            }
-            
-            .close-auth {
-                position: absolute;
-                top: 1rem;
-                right: 1rem;
-                background: none;
-                border: none;
-                color: var(--text-secondary);
-                font-size: 1.5rem;
-                cursor: pointer;
-                transition: color 0.3s ease;
-            }
-            
-            .close-auth:hover {
-                color: var(--text-primary);
+                background: var(--secondary-bg); border-radius: 15px;
+                padding: 3rem; width: 90%; max-width: 400px;
             }
             
             /* Responsive */
-            @media (max-width: 1024px) {
-                .hero-title {
-                    font-size: 3rem;
-                }
-                
-                .content-section {
-                    padding: 2rem;
-                }
-            }
-            
             @media (max-width: 768px) {
-                .logo-text {
-                    font-size: 3rem;
-                }
-                
-                header {
-                    padding: 1rem;
-                }
-                
-                .nav-links {
-                    display: none;
-                }
-                
-                .hero {
-                    height: 60vh;
-                    min-height: 400px;
-                }
-                
-                .hero-content {
-                    padding: 0 2rem;
-                }
-                
-                .hero-title {
-                    font-size: 2.5rem;
-                }
-                
-                .hero-description {
-                    font-size: 1rem;
-                }
-                
-                .content-section {
-                    padding: 1rem;
-                }
-                
-                .content-card {
-                    width: 180px;
-                }
-                
-                .card-image {
-                    height: 250px;
-                }
+                header { padding: 1rem; flex-direction: column; gap: 1rem; }
+                .search-container { margin: 0; width: 100%; }
+                .hero { padding: 0 2rem; height: 60vh; }
+                .hero-title { font-size: 2.5rem; }
+                .content-section { padding: 2rem 1rem; }
+                .content-card { width: 180px; }
+                .card-image { height: 250px; }
             }
             
             @media (max-width: 480px) {
-                .logo-text {
-                    font-size: 2.5rem;
-                }
-                
-                .hero-title {
-                    font-size: 2rem;
-                }
-                
-                .hero-buttons {
-                    flex-direction: column;
-                }
-                
-                .content-card {
-                    width: 150px;
-                }
-                
-                .card-image {
-                    height: 200px;
-                }
+                .hero-title { font-size: 2rem; }
+                .hero-buttons { flex-direction: column; }
+                .content-card { width: 150px; }
+                .card-image { height: 200px; }
             }
         </style>
     </head>
     <body>
         <!-- Loading Screen -->
         <div id="loading-screen">
-            <div class="logo-container">
-                <div class="logo-text">STREAMFLIX</div>
-                <div class="logo-tagline">PREMIUM ENTERTAINMENT</div>
-            </div>
-            <div class="loading-animation">
-                <div class="loading-dot"></div>
-                <div class="loading-dot"></div>
-                <div class="loading-dot"></div>
+            <div class="logo">BeraFix</div>
+            <div class="loading-dots">
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div class="dot"></div>
             </div>
         </div>
 
         <!-- Header -->
-        <header id="main-header">
-            <div class="header-container">
-                <a href="/" class="logo">
-                    <i class="fas fa-play-circle"></i>
-                    STREAMFLIX
-                </a>
-                
-                <div class="nav-links">
-                    <a href="#" class="nav-link active"><i class="fas fa-home"></i> Home</a>
-                    <a href="#movies" class="nav-link"><i class="fas fa-film"></i> Movies</a>
-                    <a href="#series" class="nav-link"><i class="fas fa-tv"></i> Series</a>
-                    <a href="#new" class="nav-link"><i class="fas fa-star"></i> New & Popular</a>
-                    <a href="#watchlist" class="nav-link"><i class="fas fa-bookmark"></i> My List</a>
-                </div>
-                
-                <div class="user-menu">
-                    <div class="search-container" style="position: relative; margin-right: 1rem;">
-                        <input type="text" id="search-input" placeholder="Search..." 
-                               style="padding: 8px 15px; border-radius: 20px; 
-                                      border: 2px solid rgba(255,255,255,0.2); 
-                                      background: rgba(255,255,255,0.1); 
-                                      color: white; width: 200px;">
-                        <button id="search-btn" style="position: absolute; right: 5px; top: 50%; 
-                                transform: translateY(-50%); background: none; border: none; 
-                                color: white; cursor: pointer;">
-                            <i class="fas fa-search"></i>
-                        </button>
-                    </div>
-                    
-                    <div id="user-actions">
-                        <!-- Will be populated by JavaScript -->
-                        <button class="auth-btn login-btn" id="login-btn">Sign In</button>
-                        <button class="auth-btn signup-btn" id="signup-btn">Sign Up</button>
-                    </div>
-                </div>
+        <header>
+            <a href="/" class="site-logo">
+                <i class="fas fa-play-circle"></i> BeraFix
+            </a>
+            
+            <div class="search-container">
+                <input type="text" id="search-input" placeholder="Search movies and TV series...">
+                <button id="search-btn">
+                    <i class="fas fa-search"></i>
+                </button>
+            </div>
+            
+            <div id="user-actions">
+                <button id="login-btn" style="padding: 8px 20px; background: #667eea; border: none; border-radius: 5px; color: white; cursor: pointer;">
+                    Sign In
+                </button>
             </div>
         </header>
 
         <!-- Hero Section -->
         <section class="hero" id="hero-section">
-            <!-- Hero content will be populated by JavaScript -->
+            <!-- Will be populated by JavaScript -->
         </section>
 
         <!-- Main Content -->
         <main id="main-content">
-            <!-- Content rows will be populated by JavaScript -->
+            <!-- Content rows will be loaded here -->
             <div id="content-rows"></div>
         </main>
 
         <!-- Auth Modal -->
         <div class="auth-modal" id="auth-modal">
             <div class="auth-content">
-                <button class="close-auth" id="close-auth">&times;</button>
-                
-                <div class="auth-tabs">
-                    <button class="auth-tab active" data-tab="login">Sign In</button>
-                    <button class="auth-tab" data-tab="register">Sign Up</button>
+                <h2 style="margin-bottom: 2rem; text-align: center;">Welcome to BeraFix</h2>
+                <div style="display: flex; gap: 1rem; margin-bottom: 2rem;">
+                    <button id="show-login" style="flex: 1; padding: 12px; background: #667eea; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                        Sign In
+                    </button>
+                    <button id="show-register" style="flex: 1; padding: 12px; background: #764ba2; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                        Sign Up
+                    </button>
                 </div>
                 
-                <form class="auth-form" id="login-form" style="display: block;">
-                    <div class="form-group">
-                        <label class="form-label">Username or Email</label>
-                        <input type="text" class="form-input" id="login-username" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">Password</label>
-                        <input type="password" class="form-input" id="login-password" required>
-                    </div>
-                    
-                    <button type="submit" class="auth-submit">Sign In</button>
-                    <div class="auth-error" id="login-error"></div>
+                <form id="login-form" style="display: none;">
+                    <input type="text" id="login-username" placeholder="Username or Email" style="width: 100%; padding: 12px; margin-bottom: 1rem; border-radius: 5px; border: 1px solid #ccc;">
+                    <input type="password" id="login-password" placeholder="Password" style="width: 100%; padding: 12px; margin-bottom: 1rem; border-radius: 5px; border: 1px solid #ccc;">
+                    <button type="submit" style="width: 100%; padding: 12px; background: #e50914; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                        Sign In
+                    </button>
                 </form>
                 
-                <form class="auth-form" id="register-form" style="display: none;">
-                    <div class="form-group">
-                        <label class="form-label">Username</label>
-                        <input type="text" class="form-input" id="register-username" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">Email</label>
-                        <input type="email" class="form-input" id="register-email" required>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">Password</label>
-                        <input type="password" class="form-input" id="register-password" required>
-                    </div>
-                    
-                    <button type="submit" class="auth-submit">Create Account</button>
-                    <div class="auth-error" id="register-error"></div>
+                <form id="register-form" style="display: none;">
+                    <input type="text" id="register-username" placeholder="Username" style="width: 100%; padding: 12px; margin-bottom: 1rem; border-radius: 5px; border: 1px solid #ccc;">
+                    <input type="email" id="register-email" placeholder="Email" style="width: 100%; padding: 12px; margin-bottom: 1rem; border-radius: 5px; border: 1px solid #ccc;">
+                    <input type="password" id="register-password" placeholder="Password" style="width: 100%; padding: 12px; margin-bottom: 1rem; border-radius: 5px; border: 1px solid #ccc;">
+                    <button type="submit" style="width: 100%; padding: 12px; background: #e50914; color: white; border: none; border-radius: 5px; cursor: pointer;">
+                        Create Account
+                    </button>
                 </form>
+                
+                <button id="close-auth" style="position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: white; font-size: 1.5rem; cursor: pointer;">
+                    &times;
+                </button>
             </div>
         </div>
 
-        <!-- JavaScript -->
         <script>
-            // Global state
+            // State management
             let currentUser = null;
             let authToken = localStorage.getItem('authToken');
-            let featuredContent = [];
-            let watchlist = [];
-            let watchHistory = [];
+            let homepageData = null;
             
             // DOM Elements
             const loadingScreen = document.getElementById('loading-screen');
-            const mainHeader = document.getElementById('main-header');
             const heroSection = document.getElementById('hero-section');
             const contentRows = document.getElementById('content-rows');
             const searchInput = document.getElementById('search-input');
@@ -1558,13 +1217,11 @@ app.get('/', (req, res) => {
             const userActions = document.getElementById('user-actions');
             const authModal = document.getElementById('auth-modal');
             const loginBtn = document.getElementById('login-btn');
-            const signupBtn = document.getElementById('signup-btn');
             const closeAuth = document.getElementById('close-auth');
-            const authTabs = document.querySelectorAll('.auth-tab');
+            const showLogin = document.getElementById('show-login');
+            const showRegister = document.getElementById('show-register');
             const loginForm = document.getElementById('login-form');
             const registerForm = document.getElementById('register-form');
-            const loginError = document.getElementById('login-error');
-            const registerError = document.getElementById('register-error');
             
             // Initialize
             document.addEventListener('DOMContentLoaded', async () => {
@@ -1576,70 +1233,25 @@ app.get('/', (req, res) => {
                     }, 500);
                 }, 1500);
                 
-                // Setup header scroll effect
-                window.addEventListener('scroll', () => {
-                    if (window.scrollY > 50) {
-                        mainHeader.classList.add('scrolled');
-                    } else {
-                        mainHeader.classList.remove('scrolled');
-                    }
-                });
-                
-                // Setup search
+                // Setup event listeners
                 searchBtn.addEventListener('click', performSearch);
                 searchInput.addEventListener('keypress', (e) => {
                     if (e.key === 'Enter') performSearch();
                 });
                 
-                // Setup auth
-                setupAuth();
-                
-                // Load user if token exists
-                if (authToken) {
-                    await loadUserProfile();
-                }
-                
-                // Load content
-                await loadHomeContent();
-            });
-            
-            // Setup authentication
-            function setupAuth() {
-                // Auth modal toggle
-                loginBtn.addEventListener('click', () => {
-                    authModal.style.display = 'block';
-                    document.body.style.overflow = 'hidden';
+                // Auth setup
+                loginBtn.addEventListener('click', () => authModal.style.display = 'block');
+                closeAuth.addEventListener('click', () => authModal.style.display = 'none');
+                showLogin.addEventListener('click', () => {
+                    loginForm.style.display = 'block';
+                    registerForm.style.display = 'none';
+                });
+                showRegister.addEventListener('click', () => {
+                    loginForm.style.display = 'none';
+                    registerForm.style.display = 'block';
                 });
                 
-                signupBtn.addEventListener('click', () => {
-                    authModal.style.display = 'block';
-                    document.body.style.overflow = 'hidden';
-                });
-                
-                closeAuth.addEventListener('click', closeAuthModal);
-                authModal.addEventListener('click', (e) => {
-                    if (e.target === authModal) closeAuthModal();
-                });
-                
-                // Tab switching
-                authTabs.forEach(tab => {
-                    tab.addEventListener('click', () => {
-                        const tabName = tab.dataset.tab;
-                        
-                        authTabs.forEach(t => t.classList.remove('active'));
-                        tab.classList.add('active');
-                        
-                        if (tabName === 'login') {
-                            loginForm.style.display = 'block';
-                            registerForm.style.display = 'none';
-                        } else {
-                            loginForm.style.display = 'none';
-                            registerForm.style.display = 'block';
-                        }
-                    });
-                });
-                
-                // Form submission
+                // Form submissions
                 loginForm.addEventListener('submit', async (e) => {
                     e.preventDefault();
                     await loginUser();
@@ -1649,14 +1261,51 @@ app.get('/', (req, res) => {
                     e.preventDefault();
                     await registerUser();
                 });
+                
+                // Load user if token exists
+                if (authToken) {
+                    await loadUserProfile();
+                }
+                
+                // Load homepage content
+                await loadHomepage();
+            });
+            
+            // Load user profile
+            async function loadUserProfile() {
+                try {
+                    const response = await fetch('/api/user/profile', {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        currentUser = data.user;
+                        updateUserUI();
+                    } else {
+                        localStorage.removeItem('authToken');
+                        authToken = null;
+                    }
+                } catch (error) {
+                    console.error('Profile load error:', error);
+                    localStorage.removeItem('authToken');
+                    authToken = null;
+                }
             }
             
-            // Close auth modal
-            function closeAuthModal() {
-                authModal.style.display = 'none';
-                document.body.style.overflow = 'auto';
-                loginError.textContent = '';
-                registerError.textContent = '';
+            // Update user UI
+            function updateUserUI() {
+                if (currentUser) {
+                    userActions.innerHTML = \`
+                        <div style="display: flex; align-items: center; gap: 1rem;">
+                            <span>Welcome, <strong>\${currentUser.username}</strong></span>
+                            <button onclick="logoutUser()" style="padding: 8px 20px; background: #e50914; border: none; border-radius: 5px; color: white; cursor: pointer;">
+                                Logout
+                            </button>
+                        </div>
+                    \`;
+                }
             }
             
             // Login user
@@ -1678,15 +1327,14 @@ app.get('/', (req, res) => {
                         localStorage.setItem('authToken', authToken);
                         currentUser = data.user;
                         
-                        closeAuthModal();
+                        authModal.style.display = 'none';
                         updateUserUI();
-                        loadUserData();
                     } else {
-                        loginError.textContent = data.message || 'Login failed';
+                        alert(data.message || 'Login failed');
                     }
                 } catch (error) {
                     console.error('Login error:', error);
-                    loginError.textContent = 'Login failed. Please try again.';
+                    alert('Login failed. Please try again.');
                 }
             }
             
@@ -1710,95 +1358,14 @@ app.get('/', (req, res) => {
                         localStorage.setItem('authToken', authToken);
                         currentUser = data.user;
                         
-                        closeAuthModal();
+                        authModal.style.display = 'none';
                         updateUserUI();
                     } else {
-                        registerError.textContent = data.message || 'Registration failed';
+                        alert(data.message || 'Registration failed');
                     }
                 } catch (error) {
                     console.error('Registration error:', error);
-                    registerError.textContent = 'Registration failed. Please try again.';
-                }
-            }
-            
-            // Load user profile
-            async function loadUserProfile() {
-                try {
-                    const response = await fetch('/api/user/profile', {
-                        headers: { 'Authorization': `Bearer ${authToken}` }
-                    });
-                    
-                    const data = await response.json();
-                    
-                    if (data.success) {
-                        currentUser = data.user;
-                        updateUserUI();
-                        loadUserData();
-                    } else {
-                        localStorage.removeItem('authToken');
-                        authToken = null;
-                    }
-                } catch (error) {
-                    console.error('Profile load error:', error);
-                    localStorage.removeItem('authToken');
-                    authToken = null;
-                }
-            }
-            
-            // Load user data
-            async function loadUserData() {
-                try {
-                    // Load watchlist
-                    const watchlistRes = await fetch('/api/user/watchlist', {
-                        headers: { 'Authorization': `Bearer ${authToken}` }
-                    });
-                    const watchlistData = await watchlistRes.json();
-                    if (watchlistData.success) {
-                        watchlist = watchlistData.watchlist;
-                    }
-                    
-                    // Load history
-                    const historyRes = await fetch('/api/user/history', {
-                        headers: { 'Authorization': `Bearer ${authToken}` }
-                    });
-                    const historyData = await historyRes.json();
-                    if (historyData.success) {
-                        watchHistory = historyData.history;
-                    }
-                } catch (error) {
-                    console.error('User data load error:', error);
-                }
-            }
-            
-            // Update user UI
-            function updateUserUI() {
-                if (currentUser) {
-                    userActions.innerHTML = `
-                        <div style="display: flex; align-items: center; gap: 1rem;">
-                            <div style="color: var(--text-primary);">
-                                Welcome, <strong>${currentUser.username}</strong>
-                            </div>
-                            <button class="auth-btn login-btn" id="logout-btn">Logout</button>
-                        </div>
-                    `;
-                    
-                    document.getElementById('logout-btn').addEventListener('click', logoutUser);
-                } else {
-                    userActions.innerHTML = `
-                        <button class="auth-btn login-btn" id="login-btn">Sign In</button>
-                        <button class="auth-btn signup-btn" id="signup-btn">Sign Up</button>
-                    `;
-                    
-                    // Re-attach event listeners
-                    document.getElementById('login-btn').addEventListener('click', () => {
-                        authModal.style.display = 'block';
-                        document.body.style.overflow = 'hidden';
-                    });
-                    
-                    document.getElementById('signup-btn').addEventListener('click', () => {
-                        authModal.style.display = 'block';
-                        document.body.style.overflow = 'hidden';
-                    });
+                    alert('Registration failed. Please try again.');
                 }
             }
             
@@ -1807,356 +1374,171 @@ app.get('/', (req, res) => {
                 localStorage.removeItem('authToken');
                 authToken = null;
                 currentUser = null;
-                watchlist = [];
-                watchHistory = [];
+                userActions.innerHTML = \`
+                    <button id="login-btn" style="padding: 8px 20px; background: #667eea; border: none; border-radius: 5px; color: white; cursor: pointer;">
+                        Sign In
+                    </button>
+                \`;
                 
-                updateUserUI();
+                // Re-attach event listener
+                document.getElementById('login-btn').addEventListener('click', () => {
+                    authModal.style.display = 'block';
+                });
             }
             
-            // Load home content
-            async function loadHomeContent() {
+            // Load homepage
+            async function loadHomepage() {
                 try {
-                    // Load featured categories
-                    const featuredRes = await fetch('/api/featured');
-                    const featuredData = await featuredRes.json();
+                    const response = await fetch('/api/homepage');
+                    const data = await response.json();
                     
-                    if (featuredData.success) {
-                        featuredContent = featuredData.categories;
+                    if (data.success) {
+                        homepageData = data;
                         
-                        // Set hero with first featured item
-                        if (featuredContent.length > 0 && featuredContent[0].items.length > 0) {
-                            setHeroContent(featuredContent[0].items[0]);
+                        // Set hero section
+                        if (data.featured) {
+                            setHeroContent(data.featured);
                         }
                         
-                        // Display content rows
-                        displayContentRows();
+                        // Display categories
+                        displayCategories(data.categories);
                     }
-                    
-                    // Load trending
-                    await loadTrendingRow();
-                    
-                    // Load continue watching if logged in
-                    if (currentUser) {
-                        await loadContinueWatchingRow();
-                    }
-                    
-                    // Load recommendations
-                    await loadRecommendationsRow();
                 } catch (error) {
-                    console.error('Home content error:', error);
-                    showError('Failed to load content');
+                    console.error('Homepage error:', error);
                 }
             }
             
             // Set hero content
             function setHeroContent(content) {
-                heroSection.innerHTML = `
-                    <img src="${content.cover || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
+                heroSection.innerHTML = \`
+                    <img src="\${content.backdrop || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
                          class="hero-backdrop" 
-                         alt="${content.title}"
+                         alt="\${content.title}"
                          onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1'">
                     
                     <div class="hero-content">
-                        <div class="hero-info">
-                            <h1 class="hero-title">${content.title}</h1>
-                            <p class="hero-description">
-                                Discover amazing content in stunning quality. Stream your favorite movies and TV series anytime, anywhere.
-                            </p>
-                            <div class="hero-actions">
-                                <button class="hero-btn play-btn" data-id="${content.id}">
-                                    <i class="fas fa-play"></i> Play Now
-                                </button>
-                                <button class="hero-btn info-btn" data-id="${content.id}">
-                                    <i class="fas fa-info-circle"></i> More Info
-                                </button>
-                            </div>
-                            <div class="hero-meta">
-                                <span><i class="fas fa-star"></i> ${content.rating || 'N/A'}/10</span>
-                                <span><i class="fas fa-clock"></i> ${content.type === 'tv' ? 'Series' : 'Movie'}</span>
-                                <span><i class="fas fa-calendar"></i> ${content.year || 'N/A'}</span>
-                            </div>
+                        <h1 class="hero-title">\${content.title}</h1>
+                        <p class="hero-description">
+                            \${content.description || 'Stream now on BeraFix in stunning quality.'}
+                        </p>
+                        <div class="hero-actions">
+                            <button class="hero-btn play-btn" data-id="\${content.id}">
+                                <i class="fas fa-play"></i> Play Now
+                            </button>
+                            <button class="hero-btn info-btn" data-id="\${content.id}">
+                                <i class="fas fa-info-circle"></i> More Info
+                            </button>
                         </div>
                     </div>
-                `;
-                
-                // Add event listeners to hero buttons
-                heroSection.querySelector('.play-btn').addEventListener('click', (e) => {
-                    const id = e.target.closest('button').dataset.id;
-                    playContent(id);
-                });
-                
-                heroSection.querySelector('.info-btn').addEventListener('click', (e) => {
-                    const id = e.target.closest('button').dataset.id;
-                    showContentDetails(id);
-                });
+                \`;
             }
             
-            // Display content rows
-            function displayContentRows() {
+            // Display categories
+            function displayCategories(categories) {
                 let rowsHTML = '';
                 
-                featuredContent.forEach(category => {
-                    if (category.items.length > 0) {
-                        rowsHTML += `
+                categories.forEach(category => {
+                    if (category.items && category.items.length > 0) {
+                        rowsHTML += \`
                             <div class="content-section">
                                 <div class="section-header">
                                     <h2 class="section-title">
-                                        <i class="fas fa-${getCategoryIcon(category.id)}"></i>
-                                        ${category.title}
+                                        <span>\${category.icon}</span>
+                                        \${category.title}
                                     </h2>
-                                    <a href="#" class="section-link" data-query="${category.query}">
-                                        View All <i class="fas fa-chevron-right"></i>
-                                    </a>
                                 </div>
                                 <div class="content-row">
-                                    ${category.items.map(item => createContentCard(item)).join('')}
+                                    \${category.items.map(item => \`
+                                        <div class="content-card" data-id="\${item.id}">
+                                            <img src="\${item.cover || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
+                                                 class="card-image" 
+                                                 alt="\${item.title}"
+                                                 onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1'">
+                                            <div class="card-overlay">
+                                                <h3 class="card-title">\${item.title}</h3>
+                                                <div class="card-meta">
+                                                    <span>\${item.year || ''}</span>
+                                                    <span>\${item.rating ? '⭐ ' + item.rating : ''}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    \`).join('')}
                                 </div>
                             </div>
-                        `;
+                        \`;
                     }
                 });
                 
                 contentRows.innerHTML = rowsHTML;
-                
-                // Add event listeners to view all links
-                document.querySelectorAll('.section-link').forEach(link => {
-                    link.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        const query = e.target.closest('a').dataset.query;
-                        performSearch(query);
-                    });
-                });
             }
             
-            // Load trending row
-            async function loadTrendingRow() {
-                try {
-                    const response = await fetch('/api/trending');
-                    const data = await response.json();
-                    
-                    if (data.success && data.results.length > 0) {
-                        const trendingHTML = `
-                            <div class="content-section">
-                                <div class="section-header">
-                                    <h2 class="section-title">
-                                        <i class="fas fa-fire"></i>
-                                        Trending Now
-                                    </h2>
-                                </div>
-                                <div class="content-row">
-                                    ${data.results.map(item => createContentCard(item)).join('')}
-                                </div>
-                            </div>
-                        `;
-                        
-                        contentRows.insertAdjacentHTML('beforeend', trendingHTML);
-                    }
-                } catch (error) {
-                    console.error('Trending load error:', error);
-                }
-            }
-            
-            // Load continue watching row
-            async function loadContinueWatchingRow() {
-                if (watchHistory.length > 0) {
-                    const continueHTML = `
-                        <div class="content-section">
-                            <div class="section-header">
-                                <h2 class="section-title">
-                                    <i class="fas fa-history"></i>
-                                    Continue Watching
-                                </h2>
-                            </div>
-                            <div class="content-row">
-                                ${watchHistory.slice(0, 10).map(item => createContentCard(item, true)).join('')}
-                            </div>
-                        </div>
-                    `;
-                    
-                    contentRows.insertAdjacentHTML('afterbegin', continueHTML);
-                }
-            }
-            
-            // Load recommendations row
-            async function loadRecommendationsRow() {
-                try {
-                    const response = await fetch('/api/recommendations', {
-                        headers: { 'Authorization': authToken ? `Bearer ${authToken}` : '' }
-                    });
-                    
-                    const data = await response.json();
-                    
-                    if (data.success && data.recommendations.length > 0) {
-                        const recsHTML = `
-                            <div class="content-section">
-                                <div class="section-header">
-                                    <h2 class="section-title">
-                                        <i class="fas fa-thumbs-up"></i>
-                                        Recommended For You
-                                    </h2>
-                                </div>
-                                <div class="content-row">
-                                    ${data.recommendations.map(item => createContentCard(item)).join('')}
-                                </div>
-                            </div>
-                        `;
-                        
-                        contentRows.insertAdjacentHTML('beforeend', recsHTML);
-                    }
-                } catch (error) {
-                    console.error('Recommendations error:', error);
-                }
-            }
-            
-            // Create content card
-            function createContentCard(item, isHistory = false) {
-                const inWatchlist = watchlist.some(w => w.contentId === item.id);
-                const progress = isHistory && item.position && item.duration 
-                    ? Math.round((item.position / item.duration) * 100) 
-                    : 0;
-                
-                return `
-                    <div class="content-card" data-id="${item.id}">
-                        <img src="${item.cover || item.thumbnail || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
-                             class="card-image" 
-                             alt="${item.title}"
-                             onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1'">
-                        
-                        ${isHistory && progress > 0 ? `
-                            <div style="position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: var(--accent-red); width: ${progress}%;"></div>
-                        ` : ''}
-                        
-                        <div class="card-overlay">
-                            <h3 class="card-title">${item.title}</h3>
-                            <div class="card-meta">
-                                <span>${item.rating ? `⭐ ${item.rating}` : ''}</span>
-                                <span>${item.type === 'tv' ? '📺 Series' : '🎬 Movie'}</span>
-                            </div>
-                            <div class="card-actions">
-                                <button class="card-btn play-btn" title="Play">
-                                    <i class="fas fa-play"></i>
-                                </button>
-                                <button class="card-btn info-btn" title="More Info">
-                                    <i class="fas fa-info-circle"></i>
-                                </button>
-                                <button class="card-btn watchlist-btn ${inWatchlist ? 'in-watchlist' : ''}" title="${inWatchlist ? 'Remove from Watchlist' : 'Add to Watchlist'}">
-                                    <i class="fas ${inWatchlist ? 'fa-check' : 'fa-plus'}"></i>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-            
-            // Get category icon
-            function getCategoryIcon(categoryId) {
-                const icons = {
-                    'featured-action': 'explosion',
-                    'featured-comedy': 'laugh',
-                    'featured-scifi': 'robot',
-                    'featured-drama': 'masks-theater',
-                    'featured-2024': 'calendar-star'
-                };
-                
-                return icons[categoryId] || 'film';
-            }
-            
-            // Play content
-            async function playContent(id) {
-                // Implementation for playing content
-                console.log('Play content:', id);
-                // You would open your video player modal here
-            }
-            
-            // Show content details
-            async function showContentDetails(id) {
-                // Implementation for showing details
-                console.log('Show details for:', id);
-                // You would open your details modal here
-            }
-            
-            // Perform search
-            async function performSearch() {
+            // Search function
+            function performSearch() {
                 const query = searchInput.value.trim();
-                if (!query) return;
-                
-                // Redirect to search results
-                window.location.href = `/search.html?q=${encodeURIComponent(query)}`;
+                if (query) {
+                    window.location.href = \`/search.html?q=\${encodeURIComponent(query)}\`;
+                }
             }
             
-            // Show error
-            function showError(message) {
-                contentRows.innerHTML = `
-                    <div style="text-align: center; padding: 4rem; color: var(--text-secondary);">
-                        <i class="fas fa-exclamation-triangle" style="font-size: 3rem; margin-bottom: 1rem;"></i>
-                        <h3>${message}</h3>
-                        <button onclick="window.location.reload()" 
-                                style="margin-top: 2rem; padding: 10px 20px; 
-                                       background: var(--accent-gradient); 
-                                       border: none; border-radius: 5px; 
-                                       color: white; cursor: pointer;">
-                            Try Again
-                        </button>
-                    </div>
-                `;
-            }
+            // Global logout function
+            window.logoutUser = logoutUser;
         </script>
     </body>
     </html>
-    `);
+    `;
+    
+    res.send(html);
 });
 
-// ====================
-// ADDITIONAL ROUTES
-// ====================
-
-// Search results page
+// Search page
 app.get('/search.html', (req, res) => {
-    res.send(`
+    const html = `
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Search Results - STREAMFLIX</title>
+        <title>Search - BeraFix</title>
         <style>
-            body { 
-                background: #0a0a1a; 
-                color: white; 
-                font-family: 'Poppins', sans-serif;
-                padding: 2rem;
-            }
-            .back-btn { 
-                margin-bottom: 2rem; 
-                padding: 10px 20px;
-                background: #667eea;
-                border: none;
-                border-radius: 5px;
-                color: white;
-                cursor: pointer;
-            }
+            body { background: #0a0a1a; color: white; font-family: 'Poppins', sans-serif; padding: 2rem; }
+            .back-btn { margin-bottom: 2rem; padding: 10px 20px; background: #667eea; border: none; border-radius: 5px; color: white; cursor: pointer; }
+            .search-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1.5rem; margin-top: 2rem; }
+            .result-card { background: #141430; border-radius: 10px; overflow: hidden; cursor: pointer; transition: transform 0.3s ease; }
+            .result-card:hover { transform: scale(1.05); }
+            .result-image { width: 100%; height: 280px; object-fit: cover; }
+            .result-info { padding: 1rem; }
+            .result-title { font-weight: 600; margin-bottom: 0.5rem; }
+            .result-meta { display: flex; justify-content: space-between; font-size: 0.9rem; color: #8a8d9e; }
         </style>
     </head>
     <body>
         <button class="back-btn" onclick="window.history.back()">← Back</button>
         <h1>Search Results</h1>
-        <div id="results"></div>
+        <div id="results" class="search-results"></div>
         
         <script>
             const params = new URLSearchParams(window.location.search);
             const query = params.get('q');
             
             if (query) {
-                document.title = 'Search: ' + query + ' - STREAMFLIX';
-                document.querySelector('h1').textContent = 'Search: ' + query;
+                document.title = 'Search: ' + query + ' - BeraFix';
+                document.querySelector('h1').textContent = 'Search Results: ' + query;
                 
-                // Load search results
                 fetch('/api/search/' + encodeURIComponent(query))
                     .then(res => res.json())
                     .then(data => {
                         if (data.success && data.results.length > 0) {
                             const resultsHTML = data.results.map(item => \`
-                                <div style="margin: 1rem 0; padding: 1rem; background: #141430; border-radius: 10px;">
-                                    <h3>\${item.title}</h3>
-                                    <p>\${item.year} • \${item.type}</p>
+                                <div class="result-card" data-id="\${item.id}" onclick="showDetails('\${item.id}')">
+                                    <img src="\${item.cover || 'https://images.unsplash.com/photo-1536440136628-849c177e76a1'}" 
+                                         class="result-image" 
+                                         alt="\${item.title}"
+                                         onerror="this.src='https://images.unsplash.com/photo-1536440136628-849c177e76a1'">
+                                    <div class="result-info">
+                                        <h3 class="result-title">\${item.title}</h3>
+                                        <div class="result-meta">
+                                            <span>\${item.year || 'N/A'}</span>
+                                            <span>\${item.rating ? '⭐ ' + item.rating : ''}</span>
+                                        </div>
+                                    </div>
                                 </div>
                             \`).join('');
                             
@@ -2166,17 +1548,24 @@ app.get('/search.html', (req, res) => {
                         }
                     });
             }
+            
+            function showDetails(id) {
+                // You can implement a modal or redirect to details page
+                console.log('Show details for:', id);
+            }
         </script>
     </body>
     </html>
-    `);
+    `;
+    
+    res.send(html);
 });
 
 // Service Worker
 app.get('/sw.js', (req, res) => {
     res.set('Content-Type', 'application/javascript');
     res.send(`
-        const CACHE_NAME = 'streamflix-v1';
+        const CACHE_NAME = 'berafix-v1';
         
         self.addEventListener('install', event => {
             event.waitUntil(
@@ -2197,9 +1586,9 @@ app.get('/sw.js', (req, res) => {
 // Manifest
 app.get('/manifest.json', (req, res) => {
     res.json({
-        "name": "STREAMFLIX",
-        "short_name": "Streamflix",
-        "description": "Premium streaming service",
+        "name": "BeraFix",
+        "short_name": "BeraFix",
+        "description": "Premium movie and series streaming",
         "start_url": "/",
         "display": "standalone",
         "background_color": "#0a0a1a",
@@ -2210,8 +1599,7 @@ app.get('/manifest.json', (req, res) => {
 
 // Start server
 app.listen(PORT, () => {
-    console.log(`🚀 STREAMFLIX server running on port ${PORT}`);
-    console.log(`📱 Developed by Bruce Bera`);
-    console.log(`📞 Contact: wa.me/254743983206`);
+    console.log(`🚀 BeraFix server running on port ${PORT}`);
+    console.log(`📱 MongoDB connected`);
     console.log(`🌐 Open http://localhost:${PORT} in your browser`);
 });
